@@ -1,7 +1,11 @@
 import type { JsonObject, PortalItemInfo } from '../../shared/arcgis/index.ts'
+import type {
+  DirectoryDestination,
+  PayloadStorageReference,
+} from '../../shared/storage/directory.ts'
 
 export const VIDEO_PACKAGE_SCHEMA_VERSION = 1
-export const VIDEO_CAPTURE_FRAME_RATE = 10
+export const VIDEO_CAPTURE_FRAME_RATE = 24
 export const VIDEO_FINAL_VIEW_HOLD_MS = 1_500
 
 export type VideoPackageState = 'staging' | 'complete'
@@ -139,6 +143,7 @@ export interface VideoPackageAsset {
   fileName?: string
   kind: 'attachment' | 'fallback-image' | 'popup-media'
   packageId: string
+  payloadPath?: string
 }
 
 export interface VideoCaptureFrame {
@@ -146,6 +151,7 @@ export interface VideoCaptureFrame {
   frameId: string
   index: number
   packageId: string
+  payloadPath?: string
   sceneId?: string
 }
 
@@ -159,11 +165,13 @@ export interface SavedVideoPackage {
   item: PortalItemInfo
   itemData: JsonObject
   packageId: string
+  payloadStorage?: PayloadStorageReference
   schemaVersion: number
   scenes: VideoTimelineScene[]
   state: VideoPackageState
   thumbnailBlob: Blob
   videoBlob?: Blob
+  videoFilePath?: string
   videoMimeType: string
   warnings: VideoCaptureWarning[]
   width: number
@@ -211,6 +219,7 @@ export interface VideoCaptureProgress {
 }
 
 export interface VideoCaptureOptions {
+  destination?: DirectoryDestination
   onProgress: (progress: VideoCaptureProgress) => void
   signal: AbortSignal
 }

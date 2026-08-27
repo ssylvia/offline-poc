@@ -93,4 +93,33 @@ describe('offline package persistence', () => {
     await removeStaleStagingPackages()
     expect(await getLayerSnapshots('missing-package')).toEqual([])
   })
+
+  it('cleans stale browser metadata when a package folder is inaccessible', async () => {
+    const folderPackage: SavedMapPackage = {
+      ...stagingPackage,
+      cacheName: 'offline-webmap-folder-test',
+      packageId: 'folder-package',
+      payloadStorage: {
+        destinationId: 'missing-map-destination',
+        directoryName: 'stale-map',
+        kind: 'directory',
+        packageKind: 'interactive-map',
+      },
+    }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await putPackage(folderPackage)
+    await putLayerSnapshot({
+      fields: [],
+      layerId: 'folder-layer',
+      layerJson: {},
+      objectIdField: 'OBJECTID',
+      packageId: folderPackage.packageId,
+      spatialReference: {},
+    })
+
+    await removeStaleStagingPackages()
+
+    expect(warn).toHaveBeenCalledOnce()
+    expect(await getLayerSnapshots(folderPackage.packageId)).toEqual([])
+  })
 })

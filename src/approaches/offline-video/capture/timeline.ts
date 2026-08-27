@@ -7,14 +7,29 @@ import {
   type VideoTimelineScene,
 } from '../types.ts'
 
-const minimumTransitionMs = 1_500
-const maximumTransitionMs = 8_000
+const minimumTransitionMs = 900
+const maximumTransitionMs = 6_000
 const nominalViewportWidthPixels = 960
 const metersPerPixelAtScaleOne = 0.0002645833333333333
 
 interface PointLike {
   x: number
   y: number
+}
+
+export function easeElasticPan(progress: number): number {
+  if (progress === 0 || progress === 1) {
+    return progress
+  }
+  const smoothProgress = progress * progress * (3 - 2 * progress)
+  const spring = Math.sin(progress * Math.PI * 4) * Math.pow(1 - progress, 2) * 0.08
+  return Math.min(1.04, Math.max(-0.04, smoothProgress + spring))
+}
+
+export function easeInOutCubic(progress: number): number {
+  return progress < 0.5
+    ? 4 * progress * progress * progress
+    : 1 - Math.pow(-2 * progress + 2, 3) / 2
 }
 
 interface ExtentLike {
@@ -104,7 +119,7 @@ export function calculateTransitionDurationMs(
   const zoomStops = Math.abs(Math.log2(
     readScale(destination.viewpoint) / readScale(source.viewpoint),
   ))
-  const duration = 1_200 + panInViewportWidths * 900 + zoomStops * 650
+  const duration = 900 + panInViewportWidths * 650 + zoomStops * 450
   return Math.min(maximumTransitionMs, Math.max(minimumTransitionMs, Math.round(duration)))
 }
 
@@ -123,6 +138,8 @@ export function interpolateViewpoint(
   const destinationScale = readScale(destination)
   const sourceRotation = finiteNumber(source.rotation) ?? 0
   const destinationRotation = finiteNumber(destination.rotation) ?? 0
+  const panProgress = easeElasticPan(progress)
+  const zoomProgress = easeInOutCubic(progress)
   const targetGeometry = destination.targetGeometry
   if (!targetGeometry || typeof targetGeometry !== 'object' || Array.isArray(targetGeometry)) {
     throw new Error('A captured viewpoint is missing its target geometry.')
@@ -130,12 +147,12 @@ export function interpolateViewpoint(
 
   return {
     ...destination,
-    rotation: interpolateRotation(sourceRotation, destinationRotation, progress),
-    scale: sourceScale * Math.pow(destinationScale / sourceScale, progress),
+    rotation: interpolateRotation(sourceRotation, destinationRotation, panProgress),
+    scale: sourceScale * Math.pow(destinationScale / sourceScale, zoomProgress),
     targetGeometry: {
       ...targetGeometry,
-      x: sourcePoint.x + (destinationPoint.x - sourcePoint.x) * progress,
-      y: sourcePoint.y + (destinationPoint.y - sourcePoint.y) * progress,
+      x: sourcePoint.x + (destinationPoint.x - sourcePoint.x) * panProgress,
+      y: sourcePoint.y + (destinationPoint.y - sourcePoint.y) * panProgress,
     },
   }
 }

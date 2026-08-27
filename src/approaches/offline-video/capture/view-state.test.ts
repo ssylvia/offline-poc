@@ -1,7 +1,21 @@
 import { describe, expect, it } from 'vitest'
-import { applyLayerStates } from './view-state.ts'
+import { applyLayerStates, dataUrlToBlob } from './view-state.ts'
 
 describe('offline video view state', () => {
+  it('decodes base64 and percent-encoded screenshot data without fetching', async () => {
+    const png = dataUrlToBlob('data:image/png;base64,aGVsbG8=')
+    const text = dataUrlToBlob('data:text/plain,hello%20world')
+
+    expect(png.type).toBe('image/png')
+    expect(await png.text()).toBe('hello')
+    expect(await text.text()).toBe('hello world')
+  })
+
+  it('rejects malformed screenshot data URLs', () => {
+    expect(() => dataUrlToBlob('https://example.test/frame.png')).toThrow('valid data URL')
+    expect(() => dataUrlToBlob('data:image/png;base64,%%%')).toThrow('could not be decoded')
+  })
+
   it('validates every captured layer before mutating the map', () => {
     const firstLayer = {
       id: 'layer-1',

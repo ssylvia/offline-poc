@@ -15,6 +15,7 @@ interface DownloadPanelProps {
   progress?: DownloadProgress
   report: PreflightReport
   storageEstimate: StorageEstimate
+  usesDirectoryStorage: boolean
 }
 
 export function DownloadPanel({
@@ -28,11 +29,14 @@ export function DownloadPanel({
   progress,
   report,
   storageEstimate,
+  usesDirectoryStorage,
 }: DownloadPanelProps) {
   const freeBytes = storageEstimate.quota !== undefined
     ? storageEstimate.quota - (storageEstimate.usage ?? 0)
     : undefined
-  const exceedsQuota = freeBytes !== undefined && report.estimatedBytes > freeBytes
+  const exceedsQuota = !usesDirectoryStorage
+    && freeBytes !== undefined
+    && report.estimatedBytes > freeBytes
   const percent = progress && progress.total > 0
     ? Math.round(progress.completed / progress.total * 100)
     : 0
@@ -78,7 +82,11 @@ export function DownloadPanel({
         Coverage uses the current view plus a 25% buffer and up to two higher-detail levels.
       </p>
 
-      {freeBytes !== undefined && (
+      {usesDirectoryStorage ? (
+        <p className="success-text">
+          Large package resources will be written directly to the selected folder.
+        </p>
+      ) : freeBytes !== undefined && (
         <p className={exceedsQuota ? 'error-text' : 'muted-copy'}>
           Browser storage available: {formatBytes(freeBytes)}
         </p>
@@ -148,8 +156,9 @@ export function DownloadPanel({
       </div>
 
       <p className="legal-copy">
-        This prototype stores browser-managed snapshots. Keep Esri and source attribution visible,
-        and confirm that each content provider permits offline retention.
+        Packages use the selected folder when available and otherwise use browser-managed storage.
+        Keep Esri and source attribution visible, and confirm that each content provider permits
+        offline retention.
       </p>
     </section>
   )

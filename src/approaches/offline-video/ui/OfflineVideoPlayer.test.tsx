@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SavedVideoPackage, VideoPackageAsset } from '../types.ts'
 import { OfflineVideoPlayer } from './OfflineVideoPlayer.tsx'
@@ -188,7 +189,7 @@ function setStageSize(container: HTMLElement, width: number, height: number) {
   }
   Object.defineProperty(stage, 'clientWidth', { configurable: true, value: width })
   Object.defineProperty(stage, 'clientHeight', { configurable: true, value: height })
-  resizeObserverCallback?.()
+  act(() => resizeObserverCallback?.())
 }
 
 describe('OfflineVideoPlayer', () => {
@@ -308,5 +309,24 @@ describe('OfflineVideoPlayer', () => {
     unmount()
     expect(createObjectURL).toHaveBeenCalledTimes(4)
     expect(revokeObjectURL).toHaveBeenCalledTimes(4)
+  })
+
+  it('recreates object URLs after Strict Mode cleanup instead of using a revoked video URL', () => {
+    render(
+      <StrictMode>
+        <OfflineVideoPlayer
+          assets={createAssets()}
+          onError={vi.fn()}
+          packageRecord={createPackage()}
+        />
+      </StrictMode>,
+    )
+
+    const video = screen.getByLabelText('Accessible popup tour offline video')
+    const activeUrl = video.getAttribute('src')
+    const revokedUrls = new Set(revokeObjectURL.mock.calls.map(([url]) => url))
+
+    expect(activeUrl).toMatch(/^blob:/)
+    expect(revokedUrls.has(activeUrl)).toBe(false)
   })
 })

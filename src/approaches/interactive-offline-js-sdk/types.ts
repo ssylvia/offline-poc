@@ -1,5 +1,9 @@
 import type Extent from '@arcgis/core/geometry/Extent.js'
 import type Layer from '@arcgis/core/layers/Layer.js'
+import type {
+  DirectoryDestination,
+  PayloadStorageReference,
+} from '../../shared/storage/directory.ts'
 import {
   serializeArcGisJson,
   type JsonObject,
@@ -76,12 +80,21 @@ export interface SavedMapPackage {
   itemData: JsonObject
   levels: number[]
   packageId: string
+  payloadStorage?: PayloadStorageReference
   resourceCount: number
+  resources?: StoredMapResource[]
   sdkVersion: string
   state: PackageState
   thumbnailBlob?: Blob
   viewpoint: JsonObject
   webMapJson: JsonObject
+}
+
+export interface StoredMapResource {
+  contentType: string
+  path?: string
+  size: number
+  url: string
 }
 
 export interface FeatureLayerSnapshot {
@@ -91,8 +104,20 @@ export interface FeatureLayerSnapshot {
   layerJson: JsonObject
   objectIdField: string
   packageId: string
+  source?: FeatureLayerSource
   spatialReference: JsonObject
 }
+
+export type FeatureLayerSource =
+  | {
+      kind: 'layer'
+      layerId: string
+    }
+  | {
+      kind: 'feature-collection-layer'
+      layerIndex: number
+      parentLayerId: string
+    }
 
 export interface FeatureChunk {
   chunkId: string
@@ -100,6 +125,7 @@ export interface FeatureChunk {
   index: number
   layerId: string
   packageId: string
+  payloadPath?: string
 }
 
 export type DownloadPhase =
@@ -118,6 +144,7 @@ export interface DownloadProgress {
 
 export interface DownloadOptions {
   allowDegraded: boolean
+  destination?: DirectoryDestination
   onProgress: (progress: DownloadProgress) => void
   signal: AbortSignal
 }

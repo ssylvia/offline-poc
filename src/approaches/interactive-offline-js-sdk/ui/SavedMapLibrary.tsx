@@ -1,5 +1,5 @@
-import { useEffect, useMemo } from 'react'
 import { formatBytes, formatDate } from '../../../shared/format.ts'
+import { useObjectUrl } from '../../../shared/use-object-url.ts'
 import type { SavedMapPackage } from '../types.ts'
 
 interface SavedMapLibraryProps {
@@ -15,20 +15,7 @@ function SavedMapCard({
   onUpdate,
   packageRecord,
 }: Omit<SavedMapLibraryProps, 'packages'> & { packageRecord: SavedMapPackage }) {
-  const thumbnailUrl = useMemo(
-    () => packageRecord.thumbnailBlob
-      ? URL.createObjectURL(packageRecord.thumbnailBlob)
-      : undefined,
-    [packageRecord.thumbnailBlob],
-  )
-
-  useEffect(() => {
-    return () => {
-      if (thumbnailUrl) {
-        URL.revokeObjectURL(thumbnailUrl)
-      }
-    }
-  }, [thumbnailUrl])
+  const thumbnailUrl = useObjectUrl(packageRecord.thumbnailBlob)
 
   const limitationCount = packageRecord.compatibility.filter(
     (result) => result.level !== 'supported',

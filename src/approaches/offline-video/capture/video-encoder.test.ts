@@ -16,13 +16,25 @@ const mediabunny = vi.hoisted(() => {
     buffer: ArrayBuffer | null = null
   }
 
+  class MockStreamTarget {
+    readonly writable: WritableStream
+
+    constructor(writable: WritableStream) {
+      this.writable = writable
+    }
+  }
+
   class MockWebMOutputFormat {
-    readonly mimeType = 'video/webm'
+    readonly mimeType: string = 'video/webm'
     readonly options?: unknown
 
     constructor(options?: unknown) {
       this.options = options
     }
+  }
+
+  class MockMp4OutputFormat extends MockWebMOutputFormat {
+    override readonly mimeType = 'video/mp4'
   }
 
   class MockCanvasSource {
@@ -46,15 +58,23 @@ const mediabunny = vi.hoisted(() => {
     })
     readonly finalize = vi.fn(async () => {
       this.state = 'finalizing'
-      this.target.buffer = new Uint8Array([1, 2, 3]).buffer
+      if (this.target instanceof MockBufferTarget) {
+        this.target.buffer = new Uint8Array([1, 2, 3]).buffer
+      }
       this.state = 'finalized'
     })
-    readonly options: { format: MockWebMOutputFormat; target: MockBufferTarget }
+    readonly options: {
+      format: MockWebMOutputFormat
+      target: MockBufferTarget | MockStreamTarget
+    }
     readonly start = vi.fn(async () => {
       this.state = 'started'
     })
 
-    constructor(options: { format: MockWebMOutputFormat; target: MockBufferTarget }) {
+    constructor(options: {
+      format: MockWebMOutputFormat
+      target: MockBufferTarget | MockStreamTarget
+    }) {
       this.options = options
       outputInstances.push(this)
     }
@@ -71,8 +91,10 @@ const mediabunny = vi.hoisted(() => {
   return {
     BufferTarget: MockBufferTarget,
     CanvasSource: MockCanvasSource,
+    Mp4OutputFormat: MockMp4OutputFormat,
     Output: MockOutput,
     Quality: MockQuality,
+    StreamTarget: MockStreamTarget,
     WebMOutputFormat: MockWebMOutputFormat,
     canvasSourceInstances,
     getFirstEncodableVideoCodec: vi.fn(),
@@ -83,10 +105,22 @@ const mediabunny = vi.hoisted(() => {
 vi.mock('mediabunny', () => ({
   BufferTarget: mediabunny.BufferTarget,
   CanvasSource: mediabunny.CanvasSource,
+  Mp4OutputFormat: mediabunny.Mp4OutputFormat,
   Output: mediabunny.Output,
   Quality: mediabunny.Quality,
+  StreamTarget: mediabunny.StreamTarget,
   WebMOutputFormat: mediabunny.WebMOutputFormat,
   getFirstEncodableVideoCodec: mediabunny.getFirstEncodableVideoCodec,
+}))
+
+const storage = vi.hoisted(() => ({
+  createPackageWritable: vi.fn(),
+  readPackageFile: vi.fn(),
+}))
+
+vi.mock('../../../shared/storage/directory.ts', () => ({
+  createPackageWritable: storage.createPackageWritable,
+  readPackageFile: storage.readPackageFile,
 }))
 
 import {
@@ -95,6 +129,7 @@ import {
   selectPreferredVideoCodec,
   shouldForceVideoKeyFrame,
 } from './video-encoder.ts'
+import type { DirectoryPayloadStorage } from '../../../shared/storage/directory.ts'
 
 function installCanvasMocks() {
   const context = {
@@ -127,13 +162,15 @@ describe('offline video encoder', () => {
     mediabunny.canvasSourceInstances.length = 0
     mediabunny.getFirstEncodableVideoCodec.mockReset()
     mediabunny.outputInstances.length = 0
+    storage.createPackageWritable.mockReset()
+    storage.readPackageFile.mockReset()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
 
-  it('selects VP9 before VP8 when choosing an encodable codec', () => {
+  it('selects broadly playable VP8 before VP9 when choosing an encodable codec', () => {
     expect(selectPreferredVideoCodec(['vp8'])).toBe('vp8')
-    expect(selectPreferredVideoCodec(['vp8', 'vp9'])).toBe('vp9')
+    expect(selectPreferredVideoCodec(['vp8', 'vp9'])).toBe('vp8')
     expect(selectPreferredVideoCodec(['av1'])).toBeUndefined()
   })
 
@@ -142,12 +179,20 @@ describe('offline video encoder', () => {
 
     await expect(getSupportedVideoMimeType()).resolves.toBe('video/webm;codecs=vp8')
     expect(mediabunny.getFirstEncodableVideoCodec).toHaveBeenCalledWith(
-      ['vp9', 'vp8'],
+      ['avc', 'vp8', 'vp9'],
       expect.objectContaining({
         quality: expect.objectContaining({
           options: { bitrate: 5_000_000 },
         }),
       }),
+    )
+  })
+
+  it('prefers H.264 MP4 when the browser can encode it', async () => {
+    mediabunny.getFirstEncodableVideoCodec.mockResolvedValue('avc')
+
+    await expect(getSupportedVideoMimeType()).resolves.toBe(
+      'video/mp4;codecs=avc1.42E01E',
     )
   })
 
@@ -173,7 +218,7 @@ describe('offline video encoder', () => {
     expect(mediabunny.canvasSourceInstances).toHaveLength(1)
     expect(mediabunny.outputInstances[0]?.addVideoTrack).toHaveBeenCalledWith(
       mediabunny.canvasSourceInstances[0],
-      { frameRate: 4, maximumPacketCount: 5 },
+      { frameRate: 4, maximumPacketCount: 7 },
     )
     expect(mediabunny.canvasSourceInstances[0]?.encodingConfig).toMatchObject({
       codec: 'vp8',
@@ -182,10 +227,7 @@ describe('offline video encoder', () => {
         options: { bitrate: 5_000_000 },
       }),
     })
-    expect(mediabunny.outputInstances[0]?.format.options).toEqual({
-      appendOnly: false,
-      minimumClusterDuration: 1,
-    })
+    expect(mediabunny.outputInstances[0]?.format.options).toBeUndefined()
     expect(mediabunny.canvasSourceInstances[0]?.add.mock.calls).toEqual([
       [0, 0.25, { keyFrame: true }],
       [0.25, 0.25, undefined],
@@ -224,6 +266,77 @@ describe('offline video encoder', () => {
     expect(mediabunny.canvasSourceInstances[0]?.close).toHaveBeenCalledTimes(1)
     expect(mediabunny.outputInstances[0]?.cancel).toHaveBeenCalledTimes(1)
     expect(mediabunny.outputInstances[0]?.finalize).not.toHaveBeenCalled()
+  })
+
+  it('aborts a folder writable when cancellation happens while it is opening', async () => {
+    installCanvasMocks()
+    mediabunny.getFirstEncodableVideoCodec.mockResolvedValue('avc')
+    const controller = new AbortController()
+    const reason = new DOMException('Capture cancelled', 'AbortError')
+    const abort = vi.fn(async () => undefined)
+    storage.createPackageWritable.mockImplementation(async () => {
+      controller.abort(reason)
+      return { abort } as never
+    })
+    const outputStorage = {
+      destinationId: 'destination-1',
+      directoryName: 'video-package',
+      kind: 'directory',
+      packageKind: 'offline-video',
+    } satisfies DirectoryPayloadStorage
+
+    await expect(encodeVideoFrames({
+      frameCount: 2,
+      frameRate: 24,
+      getFrame: async () => new Blob(['frame'], { type: 'image/png' }),
+      height: 720,
+      onProgress: vi.fn(),
+      outputStorage,
+      signal: controller.signal,
+      width: 1_280,
+    })).rejects.toBe(reason)
+
+    expect(abort).toHaveBeenCalledWith(reason)
+    expect(mediabunny.outputInstances).toHaveLength(0)
+  })
+
+  it('streams folder-backed output and reads the completed WebM for verification', async () => {
+    installCanvasMocks()
+    mediabunny.getFirstEncodableVideoCodec.mockResolvedValue('vp9')
+    const writable = new WritableStream()
+    storage.createPackageWritable.mockResolvedValue(writable)
+    storage.readPackageFile.mockResolvedValue(new File(['video'], 'video.webm'))
+    const outputStorage = {
+      destinationId: 'destination-1',
+      directoryName: 'video-package',
+      kind: 'directory',
+      packageKind: 'offline-video',
+    } satisfies DirectoryPayloadStorage
+
+    const result = await encodeVideoFrames({
+      frameCount: 1,
+      frameRate: 24,
+      getFrame: async () => new Blob(['frame'], { type: 'image/png' }),
+      height: 720,
+      onProgress: vi.fn(),
+      outputStorage,
+      signal: new AbortController().signal,
+      width: 1_280,
+    })
+
+    expect(storage.createPackageWritable).toHaveBeenCalledWith(
+      outputStorage,
+      'video.webm',
+    )
+    expect(mediabunny.outputInstances[0]?.target).toBeInstanceOf(mediabunny.StreamTarget)
+    expect(storage.readPackageFile).toHaveBeenCalledWith(
+      outputStorage,
+      'video.webm',
+    )
+    expect(result.blob).toEqual(expect.objectContaining({
+      size: 5,
+      type: 'video/webm',
+    }))
   })
 
   it('forces keyframes at one-second intervals', () => {

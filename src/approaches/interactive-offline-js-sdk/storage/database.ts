@@ -1,4 +1,14 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
+import {
+  deletePackageDirectory,
+  readPackageJson,
+  writePackageJson,
+  type DirectoryPayloadStorage,
+} from '../../../shared/storage/directory.ts'
+import {
+  queueDirectoryCleanup,
+  retryDirectoryCleanup,
+} from '../../../shared/storage/directory-cleanup.ts'
 import type {
   FeatureChunk,
   FeatureLayerSnapshot,
@@ -78,9 +88,22 @@ export async function putLayerSnapshot(snapshot: FeatureLayerSnapshot): Promise<
   await database.put('layerSnapshots', snapshot)
 }
 
-export async function putFeatureChunk(chunk: FeatureChunk): Promise<void> {
+export async function putFeatureChunk(
+  chunk: FeatureChunk,
+  storage?: DirectoryPayloadStorage,
+): Promise<void> {
   const database = await getDatabase()
-  await database.put('featureChunks', chunk)
+  if (!storage) {
+    await database.put('featureChunks', chunk)
+    return
+  }
+  const payloadPath = `features/${encodeURIComponent(chunk.layerId)}/${chunk.index}.json`
+  await writePackageJson(storage, payloadPath, chunk.features)
+  await database.put('featureChunks', {
+    ...chunk,
+    features: [],
+    payloadPath,
+  })
 }
 
 export async function getLayerSnapshots(packageId: string): Promise<FeatureLayerSnapshot[]> {
@@ -98,7 +121,24 @@ export async function getFeatureChunks(
     'by-layer',
     IDBKeyRange.only([packageId, layerId]),
   )
-  return chunks.sort((left, right) => left.index - right.index)
+  const packageRecord = await database.get('packages', packageId)
+  const directoryStorage = packageRecord?.payloadStorage?.kind === 'directory'
+    ? packageRecord.payloadStorage
+    : undefined
+  const hydrated = directoryStorage
+    ? await Promise.all(chunks.map(async (chunk) => (
+        chunk.payloadPath
+          ? {
+              ...chunk,
+              features: await readPackageJson<FeatureChunk['features']>(
+                directoryStorage,
+                chunk.payloadPath,
+              ),
+            }
+          : chunk
+      )))
+    : chunks
+  return hydrated.sort((left, right) => left.index - right.index)
 }
 
 export async function finalizePackage(
@@ -125,7 +165,7 @@ export async function finalizePackage(
   return completedPackage
 }
 
-export async function deletePackage(packageRecord: SavedMapPackage): Promise<void> {
+async function deletePackageRecords(packageRecord: SavedMapPackage): Promise<void> {
   const database = await getDatabase()
   const transaction = database.transaction(
     ['packages', 'layerSnapshots', 'featureChunks'],
@@ -155,11 +195,31 @@ export async function deletePackage(packageRecord: SavedMapPackage): Promise<voi
   await caches.delete(packageRecord.cacheName)
 }
 
+export async function deletePackage(packageRecord: SavedMapPackage): Promise<void> {
+  if (packageRecord.payloadStorage?.kind === 'directory') {
+    await deletePackageDirectory(packageRecord.payloadStorage)
+  }
+  await deletePackageRecords(packageRecord)
+}
+
 export async function removeStaleStagingPackages(): Promise<void> {
   const database = await getDatabase()
+  await retryDirectoryCleanup('interactive-map')
   const stagingPackages = await database.getAllFromIndex('packages', 'by-state', 'staging')
   for (const packageRecord of stagingPackages) {
-    await deletePackage(packageRecord)
+    try {
+      await deletePackage(packageRecord)
+    } catch (error) {
+      if (packageRecord.payloadStorage?.kind !== 'directory') {
+        throw error
+      }
+      console.warn(
+        `Stale map package ${packageRecord.packageId} could not be removed from its folder; browser metadata will still be cleaned up.`,
+        error,
+      )
+      await queueDirectoryCleanup(packageRecord.packageId, packageRecord.payloadStorage)
+      await deletePackageRecords(packageRecord)
+    }
   }
 
   const remainingPackages = await database.getAll('packages')

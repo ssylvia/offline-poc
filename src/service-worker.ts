@@ -14,8 +14,41 @@ declare const self: ServiceWorkerGlobalScope & {
 }
 
 const runtimeCacheName = `arcgis-sdk-runtime-${__ARCGIS_SDK_VERSION__}`
-const packageCacheByClient = new Map<string, string>()
-let lastActivePackageCache: string | undefined
+
+interface StoredResource {
+  contentType: string
+  path?: string
+  size: number
+  url: string
+}
+
+type PackageSourceMessage =
+  | {
+      cacheName: string
+      kind: 'cache'
+      resources: StoredResource[]
+    }
+  | {
+      directory: FileSystemDirectoryHandle
+      kind: 'directory'
+      resources: StoredResource[]
+    }
+
+type ActivePackageSource = (
+  | {
+      cacheName: string
+      kind: 'cache'
+    }
+  | {
+      directory: FileSystemDirectoryHandle
+      kind: 'directory'
+    }
+) & {
+  resourceByUrl: Map<string, StoredResource>
+}
+
+const packageSourceByClient = new Map<string, ActivePackageSource>()
+let lastActivePackageSource: ActivePackageSource | undefined
 
 self.skipWaiting()
 clientsClaim()
@@ -33,23 +66,29 @@ self.addEventListener('message', (event) => {
     return
   }
 
-  const message = event.data as { cacheName?: string; type?: string }
+  const message = event.data as { source?: PackageSourceMessage; type?: string }
   const sourceId = event.source && 'id' in event.source ? event.source.id : undefined
 
-  if (message.type === 'ACTIVATE_PACKAGE_CACHE' && message.cacheName) {
-    if (sourceId) {
-      packageCacheByClient.set(sourceId, message.cacheName)
+  if (message.type === 'ACTIVATE_PACKAGE_CACHE' && message.source) {
+    const activeSource: ActivePackageSource = {
+      ...message.source,
+      resourceByUrl: new Map(message.source.resources.map((resource) => (
+        [canonicalizeUrl(resource.url), resource]
+      ))),
     }
-    lastActivePackageCache = message.cacheName
+    if (sourceId) {
+      packageSourceByClient.set(sourceId, activeSource)
+    }
+    lastActivePackageSource = activeSource
     event.ports[0]?.postMessage({ activated: true })
   }
 
   if (message.type === 'DEACTIVATE_PACKAGE_CACHE') {
     if (sourceId) {
-      packageCacheByClient.delete(sourceId)
+      packageSourceByClient.delete(sourceId)
     }
-    if (!sourceId || packageCacheByClient.size === 0) {
-      lastActivePackageCache = undefined
+    if (!sourceId || packageSourceByClient.size === 0) {
+      lastActivePackageSource = undefined
     }
   }
 })
@@ -65,24 +104,73 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
-  const packageCacheName = packageCacheByClient.get(event.clientId) ?? lastActivePackageCache
-  if (!packageCacheName) {
+  const packageSource = packageSourceByClient.get(event.clientId) ?? lastActivePackageSource
+  if (!packageSource) {
     return
   }
 
   event.respondWith((async () => {
-    const packageCache = await caches.open(packageCacheName)
-    const cachedResponse = await packageCache.match(request)
-    if (cachedResponse) {
-      return cachedResponse
+    const canonicalUrl = canonicalizeUrl(request.url)
+    const resource = packageSource.resourceByUrl.get(canonicalUrl)
+    if (packageSource.kind === 'directory' && resource?.path) {
+      const file = await readDirectoryFile(packageSource.directory, resource.path)
+      return new Response(file, {
+        headers: {
+          'Content-Length': String(file.size),
+          'Content-Type': resource.contentType,
+        },
+      })
+    }
+    if (packageSource.kind === 'cache') {
+      const packageCache = await caches.open(packageSource.cacheName)
+      const cachedResponse = await packageCache.match(resource?.url ?? request)
+      if (cachedResponse) {
+        return cachedResponse
+      }
     }
 
+    if (!self.navigator.onLine) {
+      return new Response(`Resource is not available in the active offline package: ${request.url}`, {
+        status: 504,
+        statusText: 'Offline resource unavailable',
+      })
+    }
     try {
       return await fetch(request)
-    } catch (error) {
-      throw new Error(`Resource is not available in the active offline package: ${request.url}`, {
-        cause: error,
+    } catch {
+      return new Response(`Resource is not available in the active offline package: ${request.url}`, {
+        status: 504,
+        statusText: 'Offline resource unavailable',
       })
     }
   })())
 })
+
+function canonicalizeUrl(value: string): string {
+  const url = new URL(value)
+  url.hash = ''
+  const entries = [...url.searchParams.entries()].sort(([leftKey, leftValue], [rightKey, rightValue]) => (
+    leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue)
+  ))
+  url.search = ''
+  for (const [key, value] of entries) {
+    url.searchParams.append(key, value)
+  }
+  return url.href
+}
+
+async function readDirectoryFile(
+  root: FileSystemDirectoryHandle,
+  path: string,
+): Promise<File> {
+  const parts = path.split('/').filter(Boolean)
+  const fileName = parts.pop()
+  if (!fileName || parts.some((part) => part === '.' || part === '..')) {
+    throw new Error(`Invalid package resource path: ${path}`)
+  }
+  let directory = root
+  for (const part of parts) {
+    directory = await directory.getDirectoryHandle(part)
+  }
+  return (await directory.getFileHandle(fileName)).getFile()
+}

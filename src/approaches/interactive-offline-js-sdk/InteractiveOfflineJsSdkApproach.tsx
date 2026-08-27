@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { normalizeWebMapId, type UrlState, type ViewerMode } from '../../app/url-state.ts'
 import { formatDate, getErrorMessage } from '../../shared/format.ts'
+import { StorageDestinationPicker } from '../../shared/storage/StorageDestinationPicker.tsx'
+import { useDirectoryDestination } from '../../shared/storage/use-directory-destination.ts'
 import { interactiveOfflineJsSdkApproach } from './descriptor.ts'
 import { LiveMap } from './arcgis/LiveMap.tsx'
 import { OfflineMap } from './arcgis/OfflineMap.tsx'
@@ -51,6 +53,7 @@ export function InteractiveOfflineJsSdkApproach({
   const [persistentStorage, setPersistentStorage] = useState<boolean>()
   const [allowDegraded, setAllowDegraded] = useState(false)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [isLoadingPackages, setIsLoadingPackages] = useState(true)
   const [progress, setProgress] = useState<DownloadProgress>()
   const [error, setError] = useState(() => (
     initialRawId && !route.webmapId
@@ -60,6 +63,7 @@ export function InteractiveOfflineJsSdkApproach({
   const [success, setSuccess] = useState('')
   const [insideCoverage, setInsideCoverage] = useState(true)
   const downloadController = useRef<AbortController | undefined>(undefined)
+  const directoryStorage = useDirectoryDestination()
 
   const selectedPackage = packages.find(
     (packageRecord) => packageRecord.item.id === webmapId,
@@ -80,6 +84,8 @@ export function InteractiveOfflineJsSdkApproach({
         await refreshPackages()
       } catch (loadError) {
         setError(`Saved maps could not be read: ${getErrorMessage(loadError)}`)
+      } finally {
+        setIsLoadingPackages(false)
       }
     })()
   }, [refreshPackages])
@@ -182,6 +188,13 @@ export function InteractiveOfflineJsSdkApproach({
       setError('Run the download preflight first.')
       return
     }
+    if (
+      directoryStorage.destination
+      && directoryStorage.destination.permission !== 'granted'
+    ) {
+      setError('Reconnect the selected package folder before starting this download.')
+      return
+    }
 
     const controller = new AbortController()
     downloadController.current = controller
@@ -189,15 +202,20 @@ export function InteractiveOfflineJsSdkApproach({
     setSuccess('')
     setProgress({
       completed: 0,
-      detail: 'Requesting persistent browser storage',
+      detail: directoryStorage.destination
+        ? 'Preparing the selected package folder'
+        : 'Requesting persistent browser storage',
       phase: 'preparing',
       total: 1,
     })
 
     try {
-      setPersistentStorage(await requestPersistentStorage())
+      setPersistentStorage(
+        directoryStorage.destination ? undefined : await requestPersistentStorage(),
+      )
       const completed = await downloadOfflineMap(liveSession, preflight, {
         allowDegraded,
+        destination: directoryStorage.destination,
         onProgress: setProgress,
         signal: controller.signal,
       })
@@ -244,6 +262,9 @@ export function InteractiveOfflineJsSdkApproach({
 
   const handleCoverageChange = useCallback((value: boolean) => {
     setInsideCoverage(value)
+  }, [])
+  const handleOfflineReady = useCallback(() => {
+    setError('')
   }, [])
 
   return (
@@ -303,6 +324,11 @@ export function InteractiveOfflineJsSdkApproach({
           )}
         </section>
 
+        <StorageDestinationPicker
+          disabled={isAnalyzing || isDownloading}
+          state={directoryStorage}
+        />
+
         {error && (
           <div className="alert alert-error" role="alert">
             <strong>Something needs attention</strong>
@@ -336,6 +362,7 @@ export function InteractiveOfflineJsSdkApproach({
             progress={progress}
             report={preflight}
             storageEstimate={storageEstimate}
+            usesDirectoryStorage={directoryStorage.destination?.permission === 'granted'}
           />
         )}
 
@@ -373,13 +400,21 @@ export function InteractiveOfflineJsSdkApproach({
         )}
         {activeMode === 'offline' && selectedPackage && (
           <OfflineMap
-            key={selectedPackage.packageId}
+            key={`${selectedPackage.packageId}:${directoryStorage.revision}`}
             packageRecord={selectedPackage}
             onCoverageChange={handleCoverageChange}
             onError={handleMapError}
+            onReady={handleOfflineReady}
           />
         )}
-        {activeMode === 'offline' && webmapId && !selectedPackage && (
+        {activeMode === 'offline' && webmapId && !selectedPackage && isLoadingPackages && (
+          <div className="map-empty">
+            <span className="spinner" aria-hidden="true" />
+            <h2>Loading saved map…</h2>
+            <p>The offline package is being read from its saved storage location.</p>
+          </div>
+        )}
+        {activeMode === 'offline' && webmapId && !selectedPackage && !isLoadingPackages && (
           <div className="map-empty">
             <div className="empty-map-icon" aria-hidden="true">×</div>
             <h2>Snapshot not found</h2>

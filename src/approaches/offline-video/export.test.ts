@@ -79,6 +79,16 @@ describe('offline video export', () => {
     expect(manifest.assets[0].dataUrl).toMatch(/^data:text\/plain;base64,/)
   })
 
+  it('uses an MP4 filename for H.264 packages', async () => {
+    const manifest = await createVideoExportManifest({
+      ...packageRecord,
+      videoBlob: new Blob(['video'], { type: 'video/mp4' }),
+      videoMimeType: 'video/mp4',
+    }, [])
+
+    expect(manifest.video.fileName).toBe('cafe-streets-12345678.mp4')
+  })
+
   it('rejects incomplete packages without video bytes', async () => {
     await expect(createVideoExportManifest(
       { ...packageRecord, videoBlob: undefined },

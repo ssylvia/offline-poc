@@ -164,8 +164,9 @@ function installVerifiedVideo(durationSeconds: number) {
   const load = vi.fn(() => {
     if (src) {
       queueMicrotask(() => {
-        video.readyState = HTMLMediaElement.HAVE_METADATA
+        video.readyState = HTMLMediaElement.HAVE_CURRENT_DATA
         dispatch('loadedmetadata')
+        dispatch('loadeddata')
       })
     }
   })
@@ -182,7 +183,7 @@ function installVerifiedVideo(durationSeconds: number) {
     },
     duration: durationSeconds,
     load,
-    preload: 'metadata',
+    preload: 'auto',
     readyState: 0,
     removeAttribute(name: string) {
       if (name === 'src') {
@@ -252,8 +253,10 @@ describe('captureOfflineVideo', () => {
       frameStore.set(frame.index, frame.blob)
     })
     mocks.putPackage.mockResolvedValue(undefined)
+    let captureIndex = 0
     mocks.takeMapOnlyScreenshot.mockImplementation(async () => {
-      return new Blob([`capture-${frameStore.size + 1}`], { type: 'image/png' })
+      captureIndex += 1
+      return new Blob([`capture-${captureIndex}`], { type: 'image/png' })
     })
     mocks.viewpointFromJson.mockImplementation((json: unknown) => ({ json }))
   })
@@ -278,7 +281,7 @@ describe('captureOfflineVideo', () => {
         getFrame(0).then((blob: Blob) => blob.text()),
         getFrame(1).then((blob: Blob) => blob.text()),
         getFrame(2).then((blob: Blob) => blob.text()),
-      ])).toEqual(['capture-1', 'capture-2', 'capture-3'])
+      ])).toEqual(['thumbnail', 'capture-1', 'thumbnail'])
       return {
         blob: new Blob(['video'], { type: 'video/webm' }),
         mimeType: 'video/webm',
@@ -302,11 +305,19 @@ describe('captureOfflineVideo', () => {
       views: [{
         capturedAt: 1,
         extent: { xmin: 0, ymin: 0, xmax: 1, ymax: 1 },
-        id: 'view-1',
+        id: 'scene-1',
         layers: [],
         name: 'View 1',
         thumbnailBlob: new Blob(['thumbnail']),
         viewpoint: { id: 'view-1' },
+      }, {
+        capturedAt: 2,
+        extent: { xmin: 1, ymin: 1, xmax: 2, ymax: 2 },
+        id: 'scene-2',
+        layers: [],
+        name: 'View 2',
+        thumbnailBlob: new Blob(['thumbnail']),
+        viewpoint: { id: 'view-2' },
       }],
     })
 

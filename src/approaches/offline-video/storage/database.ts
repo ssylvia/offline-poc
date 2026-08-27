@@ -1,4 +1,15 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
+import {
+  deletePackageDirectory,
+  deletePackageEntry,
+  readPackageFile,
+  writePackageFile,
+  type DirectoryPayloadStorage,
+} from '../../../shared/storage/directory.ts'
+import {
+  queueDirectoryCleanup,
+  retryDirectoryCleanup,
+} from '../../../shared/storage/directory-cleanup.ts'
 import type {
   SavedVideoPackage,
   VideoCaptureFrame,
@@ -88,6 +99,21 @@ export async function getSavedPackage(
   if (packageRecord?.state !== 'complete') {
     return undefined
   }
+  if (
+    packageRecord.payloadStorage?.kind === 'directory'
+    && packageRecord.videoFilePath
+  ) {
+    const file = await readPackageFile(
+      packageRecord.payloadStorage,
+      packageRecord.videoFilePath,
+    )
+    return {
+      ...packageRecord,
+      videoBlob: file.type
+        ? file
+        : new Blob([file], { type: packageRecord.videoMimeType || 'video/webm' }),
+    }
+  }
   return packageRecord
 }
 
@@ -96,15 +122,42 @@ export async function putPackage(packageRecord: SavedVideoPackage): Promise<void
   await database.put('packages', packageRecord)
 }
 
-export async function putAsset(asset: VideoPackageAsset): Promise<void> {
+export async function putAsset(
+  asset: VideoPackageAsset,
+  storage?: DirectoryPayloadStorage,
+): Promise<void> {
   const database = await getDatabase()
-  await database.put('assets', asset)
+  if (!storage) {
+    await database.put('assets', asset)
+    return
+  }
+  const payloadPath = `assets/${encodeURIComponent(asset.assetId)}`
+  await writePackageFile(storage, payloadPath, asset.blob)
+  await database.put('assets', {
+    ...asset,
+    blob: new Blob(),
+    payloadPath,
+  })
 }
 
 export async function listAssets(packageId: string): Promise<VideoPackageAsset[]> {
   const database = await getDatabase()
   const assets = await database.getAllFromIndex('assets', 'by-package', packageId)
-  return assets.sort((left, right) => left.assetId.localeCompare(right.assetId))
+  const packageRecord = await database.get('packages', packageId)
+  const directoryStorage = packageRecord?.payloadStorage?.kind === 'directory'
+    ? packageRecord.payloadStorage
+    : undefined
+  const hydrated = directoryStorage
+    ? await Promise.all(assets.map(async (asset) => (
+        asset.payloadPath
+          ? {
+              ...asset,
+              blob: await readPackageFile(directoryStorage, asset.payloadPath),
+            }
+          : asset
+      )))
+    : assets
+  return hydrated.sort((left, right) => left.assetId.localeCompare(right.assetId))
 }
 
 export async function deleteAsset(packageId: string, assetId: string): Promise<void> {
@@ -112,14 +165,27 @@ export async function deleteAsset(packageId: string, assetId: string): Promise<v
   await database.delete('assets', [packageId, assetId])
 }
 
-export async function putFrame(frame: VideoCaptureFrame): Promise<void> {
+export async function putFrame(
+  frame: VideoCaptureFrame,
+  storage?: DirectoryPayloadStorage,
+): Promise<void> {
   const database = await getDatabase()
-  await database.put('temporaryFrames', frame)
+  if (!storage) {
+    await database.put('temporaryFrames', frame)
+    return
+  }
+  const payloadPath = `frames/${frame.index}.png`
+  await writePackageFile(storage, payloadPath, frame.blob)
+  await database.put('temporaryFrames', {
+    ...frame,
+    blob: new Blob(),
+    payloadPath,
+  })
 }
 
 export async function listFrames(packageId: string): Promise<VideoCaptureFrame[]> {
   const database = await getDatabase()
-  return database.getAllFromIndex(
+  const frames = await database.getAllFromIndex(
     'temporaryFrames',
     'by-package-index',
     IDBKeyRange.bound(
@@ -127,6 +193,20 @@ export async function listFrames(packageId: string): Promise<VideoCaptureFrame[]
       [packageId, Number.MAX_SAFE_INTEGER],
     ),
   )
+  const packageRecord = await database.get('packages', packageId)
+  const directoryStorage = packageRecord?.payloadStorage?.kind === 'directory'
+    ? packageRecord.payloadStorage
+    : undefined
+  return directoryStorage
+    ? Promise.all(frames.map(async (frame) => (
+        frame.payloadPath
+          ? {
+              ...frame,
+              blob: await readPackageFile(directoryStorage, frame.payloadPath),
+            }
+          : frame
+      )))
+    : frames
 }
 
 export async function getFrame(
@@ -134,7 +214,22 @@ export async function getFrame(
   index: number,
 ): Promise<VideoCaptureFrame | undefined> {
   const database = await getDatabase()
-  return database.getFromIndex('temporaryFrames', 'by-package-index', [packageId, index])
+  const frame = await database.getFromIndex(
+    'temporaryFrames',
+    'by-package-index',
+    [packageId, index],
+  )
+  if (!frame?.payloadPath) {
+    return frame
+  }
+  const packageRecord = await database.get('packages', packageId)
+  if (packageRecord?.payloadStorage?.kind !== 'directory') {
+    throw new Error(`Temporary frame ${index + 1} has no folder-backed package reference.`)
+  }
+  return {
+    ...frame,
+    blob: await readPackageFile(packageRecord.payloadStorage, frame.payloadPath),
+  }
 }
 
 export async function deleteFrame(packageId: string, frameId: string): Promise<void> {
@@ -150,6 +245,9 @@ export async function finalizePackage(
     ...packageRecord,
     completedAt: Date.now(),
     state: 'complete',
+  }
+  if (packageRecord.payloadStorage?.kind === 'directory') {
+    await deletePackageEntry(packageRecord.payloadStorage, 'frames', true)
   }
   const transaction = database.transaction(['packages', 'temporaryFrames'], 'readwrite')
 
@@ -168,7 +266,7 @@ export async function finalizePackage(
   return completedPackage
 }
 
-export async function deletePackage(packageId: string): Promise<void> {
+async function deletePackageRecords(packageId: string): Promise<void> {
   const database = await getDatabase()
   const transaction = database.transaction(
     ['packages', 'assets', 'temporaryFrames'],
@@ -197,18 +295,40 @@ export async function deletePackage(packageId: string): Promise<void> {
   await transaction.done
 }
 
+export async function deletePackage(packageId: string): Promise<void> {
+  const database = await getDatabase()
+  const packageRecord = await database.get('packages', packageId)
+  if (packageRecord?.payloadStorage?.kind === 'directory') {
+    await deletePackageDirectory(packageRecord.payloadStorage)
+  }
+  await deletePackageRecords(packageId)
+}
+
 export async function removeStaleStagingPackages(options?: {
   maxAgeMs?: number
   now?: number
 }): Promise<void> {
   const database = await getDatabase()
+  await retryDirectoryCleanup('offline-video')
   const now = options?.now ?? Date.now()
   const staleBefore = now - (options?.maxAgeMs ?? DEFAULT_STALE_STAGING_MAX_AGE_MS)
   const stagingPackages = await database.getAllFromIndex('packages', 'by-state', 'staging')
 
   for (const packageRecord of stagingPackages) {
     if (packageRecord.createdAt <= staleBefore) {
-      await deletePackage(packageRecord.packageId)
+      try {
+        await deletePackage(packageRecord.packageId)
+      } catch (error) {
+        if (packageRecord.payloadStorage?.kind !== 'directory') {
+          throw error
+        }
+        console.warn(
+          `Stale video package ${packageRecord.packageId} could not be removed from its folder; browser metadata will still be cleaned up.`,
+          error,
+        )
+        await queueDirectoryCleanup(packageRecord.packageId, packageRecord.payloadStorage)
+        await deletePackageRecords(packageRecord.packageId)
+      }
     }
   }
 

@@ -1,9 +1,15 @@
 import Extent from '@arcgis/core/geometry/Extent.js'
 import type FeatureLayer from '@arcgis/core/layers/FeatureLayer.js'
+import {
+  createDirectoryStorageReference,
+  readPackageFile,
+  writePackageFile,
+} from '../../../shared/storage/directory.ts'
 import { getPortalThumbnailUrl } from '../arcgis/portal.ts'
 import {
   deletePackage,
   finalizePackage,
+  getFeatureChunks,
   getLayerSnapshots,
   putFeatureChunk,
   putLayerSnapshot,
@@ -12,10 +18,13 @@ import {
 import type {
   DownloadOptions,
   FeatureLayerSnapshot,
+  FeatureLayerSource,
   JsonObject,
+  JsonValue,
   LiveMapSession,
   PreflightReport,
   SavedMapPackage,
+  StoredMapResource,
 } from '../types.ts'
 import { serializeArcGisJson } from '../types.ts'
 import { snapshotWebMapJson } from './preflight.ts'
@@ -23,11 +32,76 @@ import { snapshotWebMapJson } from './preflight.ts'
 const featureBatchSize = 500
 const resourceConcurrency = 6
 
+function asJsonObject(value: JsonValue | undefined): JsonObject | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value
+    : undefined
+}
+
+function findRawLayer(webMapJson: JsonObject, layerId: string): JsonObject | undefined {
+  const collections: JsonValue[][] = []
+  if (Array.isArray(webMapJson.operationalLayers)) {
+    collections.push(webMapJson.operationalLayers)
+  }
+  const basemap = asJsonObject(webMapJson.baseMap) ?? asJsonObject(webMapJson.basemap)
+  if (Array.isArray(basemap?.baseMapLayers)) {
+    collections.push(basemap.baseMapLayers)
+  }
+  if (Array.isArray(basemap?.referenceLayers)) {
+    collections.push(basemap.referenceLayers)
+  }
+  for (let index = 0; index < collections.length; index += 1) {
+    for (const value of collections[index]) {
+      const layer = asJsonObject(value)
+      if (layer?.id === layerId) {
+        return layer
+      }
+      if (layer?.layerType === 'GroupLayer' && Array.isArray(layer.layers)) {
+        collections.push(layer.layers)
+      }
+    }
+  }
+  return undefined
+}
+
+function getFeatureLayerSource(
+  webMapJson: JsonObject,
+  layerId: string,
+): FeatureLayerSource {
+  if (findRawLayer(webMapJson, layerId)) {
+    return { kind: 'layer', layerId }
+  }
+  const childMatch = /^(.*)-sublayer-(\d+)$/.exec(layerId)
+  if (childMatch) {
+    const layerIndex = Number(childMatch[2])
+    const parent = findRawLayer(webMapJson, childMatch[1])
+    const featureCollection = parent
+      ? asJsonObject(parent.featureCollection)
+      : undefined
+    if (Array.isArray(featureCollection?.layers) && featureCollection.layers[layerIndex]) {
+      return {
+        kind: 'feature-collection-layer',
+        layerIndex,
+        parentLayerId: childMatch[1],
+      }
+    }
+  }
+  return { kind: 'layer', layerId }
+}
+
 function createPackageRecord(
   session: LiveMapSession,
   report: PreflightReport,
+  options: DownloadOptions,
 ): SavedMapPackage {
   const version = `${Date.now()}-${crypto.randomUUID()}`
+  const payloadStorage = options.destination
+    ? createDirectoryStorageReference(
+        options.destination,
+        'interactive-map',
+        `map-${session.item.id}-${version}`,
+      )
+    : { kind: 'browser' as const }
   return {
     byteSize: 0,
     cacheName: `offline-webmap-${session.item.id}-${version}`,
@@ -39,6 +113,7 @@ function createPackageRecord(
     itemData: session.itemData,
     levels: report.levels,
     packageId: `${session.item.id}:${version}`,
+    payloadStorage,
     resourceCount: 0,
     sdkVersion: __ARCGIS_SDK_VERSION__,
     state: 'staging',
@@ -81,6 +156,7 @@ async function downloadFeatureLayer(
     layerJson,
     objectIdField: featureLayer.objectIdField,
     packageId: packageRecord.packageId,
+    source: getFeatureLayerSource(packageRecord.webMapJson, featureLayer.id),
     spatialReference: serializeArcGisJson(featureLayer.spatialReference),
   }
   await putLayerSnapshot(snapshot)
@@ -107,13 +183,18 @@ async function downloadFeatureLayer(
     batchQuery.outSpatialReference = featureLayer.spatialReference
     const featureSet = await featureLayer.queryFeatures(batchQuery, { signal: options.signal })
     const features = featureSet.features.map((feature) => feature.toJSON() as JsonObject)
-    await putFeatureChunk({
-      chunkId: `${packageRecord.packageId}:${featureLayer.id}:${index}`,
-      features,
-      index,
-      layerId: featureLayer.id,
-      packageId: packageRecord.packageId,
-    })
+    await putFeatureChunk(
+      {
+        chunkId: `${packageRecord.packageId}:${featureLayer.id}:${index}`,
+        features,
+        index,
+        layerId: featureLayer.id,
+        packageId: packageRecord.packageId,
+      },
+      packageRecord.payloadStorage?.kind === 'directory'
+        ? packageRecord.payloadStorage
+        : undefined,
+    )
     bytes += JSON.stringify(features).length * 2
     featureCount += features.length
     options.onProgress({
@@ -131,15 +212,19 @@ async function downloadResources(
   packageRecord: SavedMapPackage,
   report: PreflightReport,
   options: DownloadOptions,
-): Promise<{ bytes: number; resourceCount: number }> {
-  const cache = await caches.open(packageRecord.cacheName)
+): Promise<{ bytes: number; resources: StoredMapResource[] }> {
+  const cache = packageRecord.payloadStorage?.kind === 'directory'
+    ? undefined
+    : await caches.open(packageRecord.cacheName)
   let currentIndex = 0
   let completed = 0
   let bytes = 0
+  const resources: StoredMapResource[] = []
 
   const worker = async () => {
     while (currentIndex < report.resourceUrls.length) {
-      const resource = report.resourceUrls[currentIndex]
+      const resourceIndex = currentIndex
+      const resource = report.resourceUrls[resourceIndex]
       currentIndex += 1
       options.signal.throwIfAborted()
 
@@ -154,13 +239,31 @@ async function downloadResources(
         )
       }
 
-      const contentLength = Number(response.headers.get('content-length'))
-      if (Number.isFinite(contentLength) && contentLength > 0) {
-        bytes += contentLength
+      const contentType = response.headers.get('content-type') ?? 'application/octet-stream'
+      if (packageRecord.payloadStorage?.kind === 'directory') {
+        const blob = await response.blob()
+        const path = `resources/${resourceIndex}.bin`
+        await writePackageFile(packageRecord.payloadStorage, path, blob)
+        bytes += blob.size
+        resources.push({
+          contentType,
+          path,
+          size: blob.size,
+          url: resource.url,
+        })
       } else {
-        bytes += (await response.clone().arrayBuffer()).byteLength
+        const contentLength = Number(response.headers.get('content-length'))
+        const size = Number.isFinite(contentLength) && contentLength > 0
+          ? contentLength
+          : (await response.clone().arrayBuffer()).byteLength
+        bytes += size
+        await cache?.put(request, response)
+        resources.push({
+          contentType,
+          size,
+          url: resource.url,
+        })
       }
-      await cache.put(request, response)
       completed += 1
       options.onProgress({
         completed,
@@ -178,28 +281,58 @@ async function downloadResources(
     ),
   )
 
-  return { bytes, resourceCount: completed }
+  return { bytes, resources }
 }
 
 async function verifyPackage(
   packageRecord: SavedMapPackage,
   report: PreflightReport,
 ): Promise<void> {
-  const [layerSnapshots, cache] = await Promise.all([
+  const [layerSnapshots, featureChunks] = await Promise.all([
     getLayerSnapshots(packageRecord.packageId),
-    caches.open(packageRecord.cacheName),
+    Promise.all(report.featurePlans.map((plan) => (
+      getFeatureChunks(packageRecord.packageId, plan.layerId)
+    ))),
   ])
-  const cachedRequests = await cache.keys()
 
   if (layerSnapshots.length !== report.featurePlans.length) {
     throw new Error(
       `Offline verification found ${layerSnapshots.length} of ${report.featurePlans.length} feature layers.`,
     )
   }
-  if (cachedRequests.length !== report.resourceUrls.length) {
+  const storedFeatureCount = featureChunks
+    .flat()
+    .reduce((total, chunk) => total + chunk.features.length, 0)
+  const expectedFeatureCount = report.featurePlans
+    .reduce((total, plan) => total + plan.featureCount, 0)
+  if (storedFeatureCount !== expectedFeatureCount) {
     throw new Error(
-      `Offline verification found ${cachedRequests.length} of ${report.resourceUrls.length} cached resources.`,
+      `Offline verification found ${storedFeatureCount} of ${expectedFeatureCount} feature records.`,
     )
+  }
+  if (packageRecord.resources?.length !== report.resourceUrls.length) {
+    throw new Error(
+      `Offline verification found ${packageRecord.resources?.length ?? 0} of ${report.resourceUrls.length} stored resources.`,
+    )
+  }
+  if (packageRecord.payloadStorage?.kind === 'directory') {
+    for (const resource of packageRecord.resources) {
+      if (!resource.path) {
+        throw new Error(`Offline verification found no file for ${resource.url}.`)
+      }
+      const file = await readPackageFile(packageRecord.payloadStorage, resource.path)
+      if (file.size !== resource.size) {
+        throw new Error(`Offline verification found an incomplete file for ${resource.url}.`)
+      }
+    }
+  } else {
+    const cache = await caches.open(packageRecord.cacheName)
+    const cachedRequests = await cache.keys()
+    if (cachedRequests.length !== report.resourceUrls.length) {
+      throw new Error(
+        `Offline verification found ${cachedRequests.length} of ${report.resourceUrls.length} cached resources.`,
+      )
+    }
   }
 }
 
@@ -212,7 +345,7 @@ export async function downloadOfflineMap(
     throw new Error('Review and approve the listed compatibility limitations first.')
   }
 
-  const packageRecord = createPackageRecord(session, report)
+  const packageRecord = createPackageRecord(session, report, options)
   await putPackage(packageRecord)
 
   try {
@@ -247,16 +380,23 @@ export async function downloadOfflineMap(
     byteSize += resources.bytes
 
     const thumbnailUrl = getPortalThumbnailUrl(session.item)
-    const thumbnailResponse = thumbnailUrl
-      ? await (await caches.open(packageRecord.cacheName)).match(thumbnailUrl)
+    const thumbnailResource = thumbnailUrl
+      ? resources.resources.find((resource) => resource.url === thumbnailUrl)
       : undefined
+    const thumbnailBlob = thumbnailResource?.path && packageRecord.payloadStorage?.kind === 'directory'
+      ? await readPackageFile(packageRecord.payloadStorage, thumbnailResource.path)
+      : thumbnailUrl
+        ? await (await caches.open(packageRecord.cacheName)).match(thumbnailUrl)
+          .then((response) => response?.blob())
+        : undefined
 
     const populatedPackage: SavedMapPackage = {
       ...packageRecord,
       byteSize,
       featureCount,
-      resourceCount: resources.resourceCount,
-      thumbnailBlob: thumbnailResponse ? await thumbnailResponse.blob() : undefined,
+      resourceCount: resources.resources.length,
+      resources: resources.resources,
+      thumbnailBlob,
     }
     await putPackage(populatedPackage)
 

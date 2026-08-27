@@ -19,6 +19,10 @@ export function getVideoExportBaseName(packageRecord: SavedVideoPackage): string
   return `${slugify(packageRecord.item.title)}-${packageRecord.packageId.slice(-8)}`
 }
 
+function getVideoFileExtension(mimeType: string): 'mp4' | 'webm' {
+  return mimeType.startsWith('video/mp4') ? 'mp4' : 'webm'
+}
+
 export function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -41,7 +45,7 @@ export async function createVideoExportManifest(
   assets: VideoPackageAsset[],
 ): Promise<VideoExportManifest> {
   if (!packageRecord.videoBlob) {
-    throw new Error('The saved video package does not contain a WebM video.')
+    throw new Error('The saved video package does not contain video data.')
   }
   const exportedAssets: ExportedVideoAsset[] = await Promise.all(assets.map(async (asset) => ({
     assetId: asset.assetId,
@@ -51,6 +55,7 @@ export async function createVideoExportManifest(
     kind: asset.kind,
   })))
   const baseName = getVideoExportBaseName(packageRecord)
+  const extension = getVideoFileExtension(packageRecord.videoMimeType)
 
   return {
     assets: exportedAssets,
@@ -62,7 +67,7 @@ export async function createVideoExportManifest(
     schemaVersion: packageRecord.schemaVersion,
     scenes: packageRecord.scenes,
     video: {
-      fileName: `${baseName}.webm`,
+      fileName: `${baseName}.${extension}`,
       height: packageRecord.height,
       mimeType: packageRecord.videoMimeType,
       width: packageRecord.width,
@@ -89,12 +94,13 @@ export async function exportVideoPackage(
   assets: VideoPackageAsset[],
 ): Promise<void> {
   if (!packageRecord.videoBlob) {
-    throw new Error('The saved video package does not contain a WebM video.')
+    throw new Error('The saved video package does not contain video data.')
   }
 
   const baseName = getVideoExportBaseName(packageRecord)
+  const extension = getVideoFileExtension(packageRecord.videoMimeType)
   const manifest = await createVideoExportManifest(packageRecord, assets)
-  downloadBlob(packageRecord.videoBlob, `${baseName}.webm`)
+  downloadBlob(packageRecord.videoBlob, `${baseName}.${extension}`)
   downloadBlob(
     new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' }),
     `${baseName}.json`,

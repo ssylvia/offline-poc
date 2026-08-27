@@ -63,14 +63,39 @@ export async function takeMapOnlyScreenshot(
       width: size.width,
     })
     signal?.throwIfAborted()
-    const response = await fetch(screenshot.dataUrl)
-    if (!response.ok) {
-      throw new Error('The captured map frame could not be converted to an image.')
+    const blob = dataUrlToBlob(screenshot.dataUrl)
+    if (blob.size === 0) {
+      throw new Error('The captured map frame was empty.')
     }
-    return response.blob()
+    return blob
   } finally {
     if (popup) {
       popup.visible = popupWasVisible
     }
+  }
+}
+
+export function dataUrlToBlob(dataUrl: string): Blob {
+  const separatorIndex = dataUrl.indexOf(',')
+  if (!dataUrl.startsWith('data:') || separatorIndex < 0) {
+    throw new Error('The captured map frame was not a valid data URL.')
+  }
+  const metadata = dataUrl.slice(5, separatorIndex)
+  const encoded = dataUrl.slice(separatorIndex + 1)
+  const isBase64 = metadata.split(';').includes('base64')
+  const mimeType = metadata.split(';')[0] || 'application/octet-stream'
+
+  try {
+    if (!isBase64) {
+      return new Blob([decodeURIComponent(encoded)], { type: mimeType })
+    }
+    const binary = atob(encoded)
+    const bytes = new Uint8Array(binary.length)
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index)
+    }
+    return new Blob([bytes], { type: mimeType })
+  } catch (error) {
+    throw new Error('The captured map frame could not be decoded.', { cause: error })
   }
 }

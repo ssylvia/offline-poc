@@ -14,12 +14,14 @@ import { buildOfflineWebMap } from './offline-map-builder.ts'
 interface OfflineMapProps {
   onCoverageChange: (insideCoverage: boolean) => void
   onError: (message: string) => void
+  onReady?: () => void
   packageRecord: SavedMapPackage
 }
 
 export function OfflineMap({
   onCoverageChange,
   onError,
+  onReady,
   packageRecord,
 }: OfflineMapProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -27,14 +29,33 @@ export function OfflineMap({
 
   useEffect(() => {
     let disposed = false
+    let cacheActivated = false
     let view: MapView | undefined
     const handles: Array<{ remove: () => void }> = []
 
+    const releaseResources = () => {
+      handles.splice(0).forEach((handle) => handle.remove())
+      view?.destroy()
+      view = undefined
+      if (cacheActivated) {
+        cacheActivated = false
+        deactivatePackageCache()
+      }
+    }
+
     const load = async () => {
       setIsLoading(true)
-      await activatePackageCache(packageRecord.cacheName)
+      await activatePackageCache(packageRecord)
+      cacheActivated = true
+      if (disposed) {
+        releaseResources()
+        return
+      }
+
       const map = await buildOfflineWebMap(packageRecord)
       if (disposed || !containerRef.current) {
+        map.destroy()
+        releaseResources()
         return
       }
 
@@ -71,9 +92,11 @@ export function OfflineMap({
       )
       updateCoverage()
       setIsLoading(false)
+      onReady?.()
     }
 
     void load().catch((error: unknown) => {
+      releaseResources()
       if (!disposed) {
         setIsLoading(false)
         onError(getErrorMessage(error))
@@ -82,11 +105,9 @@ export function OfflineMap({
 
     return () => {
       disposed = true
-      handles.forEach((handle) => handle.remove())
-      view?.destroy()
-      deactivatePackageCache()
+      releaseResources()
     }
-  }, [onCoverageChange, onError, packageRecord])
+  }, [onCoverageChange, onError, onReady, packageRecord])
 
   return (
     <div className="map-host">

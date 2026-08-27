@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { JsonObject } from '../../../shared/arcgis/index.ts'
-import type { VideoDraftView } from '../types.ts'
+import { VIDEO_CAPTURE_FRAME_RATE, type VideoDraftView } from '../types.ts'
 import {
   calculateTransitionDurationMs,
   createVideoTimeline,
+  easeElasticPan,
+  easeInOutCubic,
   interpolateViewpoint,
   videoTimingConstants,
 } from './timeline.ts'
@@ -40,6 +42,17 @@ function makeView(
 }
 
 describe('offline video timeline', () => {
+  it('uses a 24 FPS capture rate and bounded easing with exact endpoints', () => {
+    expect(VIDEO_CAPTURE_FRAME_RATE).toBe(24)
+    const elasticProgress = Array.from({ length: 101 }, (_, index) => easeElasticPan(index / 100))
+    expect(elasticProgress[0]).toBe(0)
+    expect(elasticProgress.at(-1)).toBe(1)
+    expect(elasticProgress.every((value) => value >= -0.04 && value <= 1.04)).toBe(true)
+    expect(easeInOutCubic(0)).toBe(0)
+    expect(easeInOutCubic(0.5)).toBe(0.5)
+    expect(easeInOutCubic(1)).toBe(1)
+  })
+
   it('scales transition duration by pan and zoom with bounded output', () => {
     const source = makeView('first', 0, 1_000)
     expect(calculateTransitionDurationMs(source, makeView('nearby', 0, 1_000))).toBe(

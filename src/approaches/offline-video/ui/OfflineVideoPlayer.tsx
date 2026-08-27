@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { formatBytes } from '../../../shared/format.ts'
+import { useObjectUrl, useObjectUrlMap } from '../../../shared/use-object-url.ts'
 import type {
   CapturedPopup,
   CapturedPopupContent,
@@ -283,25 +284,12 @@ export function OfflineVideoPlayer({
     top: 0,
     width: 0,
   })
-  const videoUrl = useMemo(
-    () => packageRecord.videoBlob ? URL.createObjectURL(packageRecord.videoBlob) : undefined,
-    [packageRecord.videoBlob],
-  )
-  const assetUrls = useMemo(
-    () => new Map(assets.map((asset) => [asset.assetId, URL.createObjectURL(asset.blob)])),
+  const videoUrl = useObjectUrl(packageRecord.videoBlob)
+  const assetBlobs = useMemo(
+    () => assets.map((asset) => [asset.assetId, asset.blob] as const),
     [assets],
   )
-
-  useEffect(() => {
-    return () => {
-      if (videoUrl) {
-        URL.revokeObjectURL(videoUrl)
-      }
-      for (const url of assetUrls.values()) {
-        URL.revokeObjectURL(url)
-      }
-    }
-  }, [assetUrls, videoUrl])
+  const assetUrls = useObjectUrlMap(assetBlobs)
 
   useEffect(() => {
     const stage = stageRef.current
@@ -320,7 +308,7 @@ export function OfflineVideoPlayer({
     observer.observe(stage)
     updateRect()
     return () => observer.disconnect()
-  }, [packageRecord.height, packageRecord.width])
+  }, [packageRecord.height, packageRecord.width, videoUrl])
 
   const activeScene = findActiveScene(packageRecord.scenes, currentTimeMs)
   const activeSceneIndex = activeScene?.index ?? packageRecord.scenes.findLastIndex(
@@ -344,12 +332,21 @@ export function OfflineVideoPlayer({
     setCurrentTimeMs(scene.timestampMs)
   }, [])
 
-  if (!videoUrl) {
+  if (!packageRecord.videoBlob) {
     return (
       <div className="map-empty">
         <div className="empty-map-icon" aria-hidden="true">×</div>
         <h2>Video data is missing</h2>
-        <p>This saved package cannot be played because it has no WebM blob.</p>
+        <p>This saved package cannot be played because its video data is missing.</p>
+      </div>
+    )
+  }
+  if (!videoUrl) {
+    return (
+      <div className="map-empty">
+        <span className="spinner" aria-hidden="true" />
+        <h2>Preparing saved video…</h2>
+        <p>The local WebM data is being prepared for playback.</p>
       </div>
     )
   }
@@ -369,7 +366,7 @@ export function OfflineVideoPlayer({
           playsInline
           src={videoUrl}
           aria-label={`${packageRecord.item.title} offline video`}
-          onError={() => onError('The saved WebM video could not be played.')}
+          onError={() => onError('The saved offline video could not be played.')}
           onEnded={() => setCurrentTimeMs(packageRecord.durationMs)}
           onSeeked={(event) => setCurrentTimeMs(event.currentTarget.currentTime * 1_000)}
           onTimeUpdate={(event) => setCurrentTimeMs(event.currentTarget.currentTime * 1_000)}

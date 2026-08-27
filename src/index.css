@@ -538,6 +538,17 @@ button:disabled {
   width: 100%;
 }
 
+.storage-destination {
+  margin-top: 16px;
+  padding-top: 16px !important;
+}
+
+.storage-destination-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .legal-copy {
   margin-top: 12px;
   padding-top: 11px;

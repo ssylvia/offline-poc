@@ -172,6 +172,7 @@ describe('offline video storage', () => {
     const stalePackage = createPackage({
       createdAt: now - DEFAULT_STALE_STAGING_MAX_AGE_MS - 1,
     })
+
     const recentPackage = createPackage({ createdAt: now })
     const completedPackage = createPackage()
 
@@ -191,6 +192,34 @@ describe('offline video storage', () => {
     expect(await listAssets(stalePackage.packageId)).toEqual([])
     expect(await listFrames(stalePackage.packageId)).toEqual([])
     expect((await listFrames(recentPackage.packageId)).map((entry) => entry.index)).toEqual([0])
+    expect((await listSavedPackages(completedPackage.item.id)).map((entry) => entry.packageId)).toEqual([
+      completedPackage.packageId,
+    ])
+  })
+
+  it('does not hide valid videos when stale folder cleanup needs permission', async () => {
+    const now = Date.now()
+    const stalePackage = createPackage({
+      createdAt: now - DEFAULT_STALE_STAGING_MAX_AGE_MS - 1,
+      payloadStorage: {
+        destinationId: nextId('missing-destination'),
+        directoryName: 'stale-video',
+        kind: 'directory',
+        packageKind: 'offline-video',
+      },
+    })
+    const completedPackage = createPackage()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    await putPackage(stalePackage)
+    await putFrame(createFrame(stalePackage.packageId, 0))
+    await putPackage(completedPackage)
+    await finalizePackage(completedPackage)
+
+    await removeStaleStagingPackages({ now })
+
+    expect(warn).toHaveBeenCalledOnce()
+    expect(await listFrames(stalePackage.packageId)).toEqual([])
     expect((await listSavedPackages(completedPackage.item.id)).map((entry) => entry.packageId)).toEqual([
       completedPackage.packageId,
     ])

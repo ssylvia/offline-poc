@@ -1,4 +1,7 @@
-export async function activatePackageCache(cacheName: string): Promise<void> {
+import { getPackageDirectory } from '../../../shared/storage/directory.ts'
+import type { SavedMapPackage } from '../types.ts'
+
+export async function activatePackageCache(packageRecord: SavedMapPackage): Promise<void> {
   const registration = await navigator.serviceWorker.ready
   const worker = navigator.serviceWorker.controller ?? registration.active
   if (!worker) {
@@ -17,10 +20,27 @@ export async function activatePackageCache(cacheName: string): Promise<void> {
       channel.port1.close()
       resolve()
     }
-    worker.postMessage(
-      { type: 'ACTIVATE_PACKAGE_CACHE', cacheName },
-      [channel.port2],
-    )
+    void (async () => {
+      const source = packageRecord.payloadStorage?.kind === 'directory'
+        ? {
+            directory: await getPackageDirectory(packageRecord.payloadStorage),
+            kind: 'directory' as const,
+            resources: packageRecord.resources ?? [],
+          }
+        : {
+            cacheName: packageRecord.cacheName,
+            kind: 'cache' as const,
+            resources: packageRecord.resources ?? [],
+          }
+      worker.postMessage(
+        { type: 'ACTIVATE_PACKAGE_CACHE', source },
+        [channel.port2],
+      )
+    })().catch((error: unknown) => {
+      window.clearTimeout(timeout)
+      channel.port1.close()
+      reject(error)
+    })
   })
 }
 

@@ -5,6 +5,8 @@ import {
   type LiveMapSession,
 } from '../../shared/arcgis/index.ts'
 import { formatBytes, formatDate, getErrorMessage } from '../../shared/format.ts'
+import { StorageDestinationPicker } from '../../shared/storage/StorageDestinationPicker.tsx'
+import { useDirectoryDestination } from '../../shared/storage/use-directory-destination.ts'
 import {
   countDraftWarningsByView,
   listDraftAssets,
@@ -149,6 +151,7 @@ export function VideoOfflineApproach({
   const [storageEstimate, setStorageEstimate] = useState<StorageEstimate>({})
   const [persistentStorage, setPersistentStorage] = useState<boolean>()
   const [isLoadingLibrary, setIsLoadingLibrary] = useState(true)
+  const [resolvedPackageKey, setResolvedPackageKey] = useState<string>()
   const [isRecordingView, setIsRecordingView] = useState(false)
   const [progress, setProgress] = useState<VideoCaptureProgress>()
   const [error, setError] = useState(() => (
@@ -157,8 +160,19 @@ export function VideoOfflineApproach({
       : ''
   ))
   const [success, setSuccess] = useState('')
+  const directoryStorage = useDirectoryDestination()
 
   const activeMode = route.savedVideoPackageId ? 'offline' : 'live'
+  const packageLoadKey = route.savedVideoPackageId
+    ? `${route.savedVideoPackageId}:${directoryStorage.revision}`
+    : undefined
+  const routedSelectedPackage = selectedPackage?.packageId === route.savedVideoPackageId
+    && resolvedPackageKey === packageLoadKey
+    ? selectedPackage
+    : undefined
+  const isResolvingSelectedPackage = Boolean(
+    packageLoadKey && resolvedPackageKey !== packageLoadKey,
+  )
   const isCapturing = progress !== undefined && progress.phase !== 'complete'
   const packagesForWebMap = useMemo(
     () => route.webmapId
@@ -262,12 +276,14 @@ export function VideoOfflineApproach({
     const packageId = route.savedVideoPackageId
     if (!packageId) {
       setSelectedPackage(undefined)
+      setResolvedPackageKey(undefined)
       return () => {
         cancelled = true
       }
     }
 
     void (async () => {
+      setError('')
       try {
         const packageRecord = await getSavedPackage(packageId)
         if (!cancelled) {
@@ -278,30 +294,21 @@ export function VideoOfflineApproach({
           setError(`The saved video could not be loaded: ${getErrorMessage(packageError)}`)
           setSelectedPackage(undefined)
         }
+      } finally {
+        if (!cancelled) {
+          setResolvedPackageKey(`${packageId}:${directoryStorage.revision}`)
+        }
       }
     })()
 
     return () => {
       cancelled = true
     }
-  }, [route.savedVideoPackageId])
-
-  useEffect(() => {
-    if (!route.savedVideoPackageId) {
-      setSelectedPackage(undefined)
-      return
-    }
-    const fromLibrary = savedPackages.find(
-      (packageRecord) => packageRecord.packageId === route.savedVideoPackageId,
-    )
-    if (fromLibrary) {
-      setSelectedPackage(fromLibrary)
-    }
-  }, [route.savedVideoPackageId, savedPackages])
+  }, [directoryStorage.revision, route.savedVideoPackageId])
 
   useEffect(() => {
     let cancelled = false
-    if (!selectedPackage) {
+    if (!routedSelectedPackage) {
       setSelectedAssets([])
       return () => {
         cancelled = true
@@ -311,7 +318,7 @@ export function VideoOfflineApproach({
 
     void (async () => {
       try {
-        const assets = await listAssets(selectedPackage.packageId)
+        const assets = await listAssets(routedSelectedPackage.packageId)
         if (!cancelled) {
           setSelectedAssets(assets)
         }
@@ -326,7 +333,7 @@ export function VideoOfflineApproach({
     return () => {
       cancelled = true
     }
-  }, [selectedPackage])
+  }, [routedSelectedPackage])
 
   useEffect(() => {
     return () => captureController.current?.abort()
@@ -442,6 +449,13 @@ export function VideoOfflineApproach({
       setError('Add at least one final view before creating a video.')
       return
     }
+    if (
+      directoryStorage.destination
+      && directoryStorage.destination.permission !== 'granted'
+    ) {
+      setError('Reconnect the selected package folder before creating this video.')
+      return
+    }
 
     const normalizedViews = draftViews.map((view, index) => ({
       ...view,
@@ -454,19 +468,24 @@ export function VideoOfflineApproach({
     setSuccess('')
     setProgress({
       completed: 0,
-      detail: 'Requesting persistent browser storage',
+      detail: directoryStorage.destination
+        ? 'Preparing the selected package folder'
+        : 'Requesting persistent browser storage',
       phase: 'preparing',
       total: 1,
     })
 
     try {
       const { captureOfflineVideo } = await loadLiveCaptureSupport()
-      setPersistentStorage(await requestPersistentStorage())
+      setPersistentStorage(
+        directoryStorage.destination ? undefined : await requestPersistentStorage(),
+      )
       const completed = await captureOfflineVideo({
         assets: draftAssets,
         options: {
           onProgress: setProgress,
           signal: controller.signal,
+          destination: directoryStorage.destination,
         },
         packageId: createId('video-package'),
         session: liveSession,
@@ -486,7 +505,14 @@ export function VideoOfflineApproach({
       captureController.current = undefined
       setStorageEstimate(await getStorageEstimate())
     }
-  }, [draftAssets, draftViews, draftWarnings, liveSession, refreshPackages])
+  }, [
+    directoryStorage.destination,
+    draftAssets,
+    draftViews,
+    draftWarnings,
+    liveSession,
+    refreshPackages,
+  ])
 
   const openSaved = useCallback((packageRecord: SavedVideoPackage) => {
     setError('')
@@ -508,7 +534,14 @@ export function VideoOfflineApproach({
     setError('')
     setSuccess('')
     try {
-      await exportVideoPackage(packageRecord, await listAssets(packageRecord.packageId))
+      const hydratedPackage = await getSavedPackage(packageRecord.packageId)
+      if (!hydratedPackage) {
+        throw new Error('The saved video package no longer exists.')
+      }
+      await exportVideoPackage(
+        hydratedPackage,
+        await listAssets(packageRecord.packageId),
+      )
       setSuccess(`${packageRecord.item.title} was exported.`)
     } catch (exportError) {
       setError(`The saved video could not be exported: ${getErrorMessage(exportError)}`)
@@ -549,7 +582,7 @@ export function VideoOfflineApproach({
           </div>
           <p className="scope-copy">
             Capture an ordered set of final views from a live WebMap, then render them into an
-            offline video package that stays in this browser.
+            offline video package that stays on this device.
           </p>
           <form className="item-form" onSubmit={handleSubmit}>
             <label htmlFor="video-webmap-id">ArcGIS WebMap item ID</label>
@@ -572,8 +605,8 @@ export function VideoOfflineApproach({
               : 'The browser is offline. Previously saved videos remain routable and playable here.'}
           </p>
           <p className="legal-copy">
-            Creating a video package requires browser WebM encoding support. This prototype is
-            currently targeted at desktop Chrome and Edge.
+            Creating a video package requires browser H.264/MP4 or WebM encoding support. This
+            prototype is currently targeted at desktop Chrome and Edge.
           </p>
           {route.webmapId && (
             <div className="current-map-actions">
@@ -592,7 +625,7 @@ export function VideoOfflineApproach({
                   type="button"
                   className="button button-secondary button-wide"
                   disabled={isCapturing}
-                  onClick={() => navigateToComposer(selectedPackage?.item.id ?? route.webmapId)}
+                  onClick={() => navigateToComposer(routedSelectedPackage?.item.id ?? route.webmapId)}
                 >
                   Return to live WebMap
                 </button>
@@ -600,6 +633,11 @@ export function VideoOfflineApproach({
             </div>
           )}
         </section>
+
+        <StorageDestinationPicker
+          disabled={isCapturing || isRecordingView}
+          state={directoryStorage}
+        />
 
         {error && (
           <div className="alert alert-error" role="alert">
@@ -654,15 +692,26 @@ export function VideoOfflineApproach({
 
         <section aria-labelledby="video-storage-heading">
           <div className="section-heading">
-            <h2 id="video-storage-heading">Browser storage</h2>
+            <h2 id="video-storage-heading">Storage status</h2>
           </div>
-          <p className="scope-copy">
-            Saved videos, popup assets, and temporary frames stay in browser-managed storage.
-          </p>
-          <p className="muted-copy">{storageSummary(storageEstimate)}</p>
+          {directoryStorage.destination?.permission === 'granted' ? (
+            <p className="scope-copy">
+              Video, popup assets, and temporary frames are stored in
+              {' '}
+              <strong>{directoryStorage.destination.name}</strong>
+              . Package metadata stays in this browser.
+            </p>
+          ) : (
+            <>
+              <p className="scope-copy">
+                Saved videos, popup assets, and temporary frames use browser-managed storage.
+              </p>
+              <p className="muted-copy">{storageSummary(storageEstimate)}</p>
+            </>
+          )}
           <p className="legal-copy">
-            There is no fixed view limit, but more views and larger map sizes increase temporary
-            storage pressure during capture.
+            Video is captured at 24 FPS. There is no fixed view limit, but more views and larger
+            map sizes increase capture time and temporary storage.
           </p>
           {persistentStorage !== undefined && (
             <p className={persistentStorage ? 'success-text' : 'warning-text'}>
@@ -690,13 +739,13 @@ export function VideoOfflineApproach({
       </aside>
 
       <section className="map-panel" aria-label="Map viewer">
-        {activeMode === 'offline' && selectedPackage && (
+        {activeMode === 'offline' && routedSelectedPackage && (
           <div className="map-status-bar">
             <span className="offline-pill">Offline video</span>
-            <span>Saved {formatDate(selectedPackage.completedAt ?? selectedPackage.createdAt)}</span>
-            {selectedPackage.warnings.length > 0 && (
+            <span>Saved {formatDate(routedSelectedPackage.completedAt ?? routedSelectedPackage.createdAt)}</span>
+            {routedSelectedPackage.warnings.length > 0 && (
               <span className="degraded-pill">
-                {selectedPackage.warnings.length} warning{selectedPackage.warnings.length === 1 ? '' : 's'}
+                {routedSelectedPackage.warnings.length} warning{routedSelectedPackage.warnings.length === 1 ? '' : 's'}
               </span>
             )}
           </div>
@@ -720,26 +769,26 @@ export function VideoOfflineApproach({
             />
           </Suspense>
         )}
-        {activeMode === 'offline' && selectedPackage && (
+        {activeMode === 'offline' && routedSelectedPackage && (
           <OfflineVideoPlayer
-            key={selectedPackage.packageId}
+            key={routedSelectedPackage.packageId}
             assets={selectedAssets}
             onError={handleMapError}
-            packageRecord={selectedPackage}
+            packageRecord={routedSelectedPackage}
           />
         )}
-        {activeMode === 'offline' && route.savedVideoPackageId && !selectedPackage && isLoadingLibrary && (
+        {activeMode === 'offline' && route.savedVideoPackageId && !routedSelectedPackage && (isLoadingLibrary || isResolvingSelectedPackage) && (
           <div className="map-empty">
             <span className="spinner" aria-hidden="true" />
             <h2>Loading saved video…</h2>
-            <p>The routed video package is being read from browser storage.</p>
+            <p>The routed video package is being read from its saved storage location.</p>
           </div>
         )}
-        {activeMode === 'offline' && route.savedVideoPackageId && !selectedPackage && !isLoadingLibrary && (
+        {activeMode === 'offline' && route.savedVideoPackageId && !routedSelectedPackage && !isLoadingLibrary && !isResolvingSelectedPackage && (
           <div className="map-empty">
             <div className="empty-map-icon" aria-hidden="true">×</div>
             <h2>Saved video not found</h2>
-            <p>This routed video package is not available in this browser.</p>
+            <p>This routed video package is not available on this device.</p>
           </div>
         )}
         {activeMode === 'live' && route.webmapId && !isOnline && !latestSavedForWebMap && (

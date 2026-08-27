@@ -3,7 +3,7 @@
 A React + Vite PWA for public ArcGIS WebMaps with two browser-local offline approaches:
 
 - **Interactive offline snapshot** — self-hosted ArcGIS Maps SDK assets plus bounded map/resource capture for later offline browsing.
-- **Offline video package** — ordered final views rendered into a saved WebM video with popup metadata/assets for offline playback.
+- **Offline video package** — ordered final views rendered into a saved MP4 or WebM video with popup metadata/assets for offline playback.
 
 ## Run locally
 
@@ -46,13 +46,17 @@ The production build:
 - generates `/arcgis-runtime-manifest.json`
 - precaches the app shell and built assets through the service worker
 
-Runtime data stays in browser-managed storage on the current device:
+Package metadata stays in browser-managed storage on the current device. Payloads can use either:
 
-- **Cache Storage** retains downloaded ArcGIS runtime/map resources used by the interactive snapshot approach.
-- **IndexedDB** retains interactive map definitions/feature snapshots plus offline video packages, popup assets, and temporary capture frames.
+- **Browser storage** — Cache Storage retains downloaded ArcGIS map resources, while IndexedDB retains interactive map definitions/features, video packages, popup assets, and temporary frames.
+- **A selected folder** — desktop Chrome/Edge users can choose a folder that receives map resources, feature chunks, popup assets, temporary frames, and final videos directly. IndexedDB retains only package metadata and small indexes needed to reopen those files.
 - The app requests persistent storage, but browsers may still evict data when storage pressure is high if persistence is denied.
 
-There is no server sync or cross-device restore flow in this prototype.
+Folder handles are remembered when the browser permits it. A browser may require the user to reconnect the folder after a restart or permission change. Existing browser-backed packages remain readable after a folder is selected.
+
+The production service worker precaches the application shell, lazy application chunks, required ArcGIS localization/icons, geometry assets, and ArcGIS worker chunks. After the initial online load and package download, saved routes can be hard-refreshed offline.
+
+There is no server sync or cross-device restore flow in this prototype. Moving or deleting a selected package folder outside the application makes its package unavailable.
 
 ## Approach details
 
@@ -71,10 +75,12 @@ Current implementation boundaries:
 
 Use `?approach=offline-video` to capture final views in playback order. Each saved package includes:
 
-- a WebM video rendered in-browser
+- an H.264/MP4 video when supported, with VP8/VP9 WebM as a fallback
 - retained popup metadata/content plus downloaded popup assets when available
 - browser-routable playback using `video-package=<saved-package-id>`
-- export as **two files**: `<name>.webm` and `<name>.json`
+- export as **two files**: `<name>.mp4` or `<name>.webm`, plus `<name>.json`
+
+Transitions are captured at **24 FPS** with damped elastic pan motion and eased logarithmic zoom. Final-view hold frames reuse the already captured final image, which avoids repeatedly rendering identical map states.
 
 There is no hard-coded view limit, but larger view counts and larger map viewports increase duration and temporary working storage. The UI warns once estimated temporary working storage reaches roughly **250 MB**, and capture can still fail earlier or later depending on browser quota/performance.
 
@@ -88,7 +94,31 @@ Attachments and popup media are saved only when they can be fetched during captu
 
 Desktop Chrome and Edge are the primary targets for both approaches.
 
-The offline video workflow specifically depends on browser WebCodecs support plus in-browser WebM muxing through `mediabunny` (`video/webm`, preferring VP9 then VP8). In practice, creating saved video packages currently requires Chrome or Edge-class support. Other browsers may load the app but fail to encode or reliably play generated video packages.
+The offline video workflow specifically depends on browser WebCodecs support plus in-browser muxing through `mediabunny`. It prefers H.264/MP4 because that combination has the broadest reliable playback in Chromium, then falls back to VP8/VP9 WebM. In practice, creating saved video packages currently requires Chrome or Edge-class support. Other browsers may load the app but fail to encode or reliably play generated video packages.
+
+The File System Access API used by **Choose download folder** is also a desktop Chrome/Edge feature. Unsupported browsers continue to use browser storage.
+
+## Offline verification
+
+Use the production service worker when checking offline behavior:
+
+```bash
+npm run build
+npm run preview
+```
+
+1. Open a public WebMap while online and create a package.
+2. Open the saved package once, switch the browser network context offline, and hard-refresh its saved URL.
+3. For interactive snapshots, pan and zoom inside the downloaded coverage and confirm features/tiles remain visible.
+4. For videos, play the full capture and use every saved-view seek button.
+5. Repeat with **Choose download folder** and confirm the package files are created below `offline-arcgis-packages/`.
+
+Representative public test items used by this prototype are:
+
+- `f2e9b762544945f390ca4ac3671cfa72` — small feature layer with a vector basemap
+- `816a9036e6b9415587d67d04257107f9` — raster tile WebMap
+- `c50de463235e4161b206d000587af18b` — vector tile style/glyph resources
+- `3d355e34cbd3405dbb3f031286f7b39b` — unsupported imagery-layer preflight
 
 ## Prototype boundaries
 

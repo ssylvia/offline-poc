@@ -1,5 +1,5 @@
-import { useEffect, useMemo } from 'react'
 import { formatBytes } from '../../../shared/format.ts'
+import { useObjectUrl } from '../../../shared/use-object-url.ts'
 import { estimateVideoCapture } from '../capture/timeline.ts'
 import type { VideoCaptureProgress, VideoDraftView } from '../types.ts'
 
@@ -43,8 +43,7 @@ function DraftViewRow({
   viewCount: number
   warningCount: number
 }) {
-  const thumbnailUrl = useMemo(() => URL.createObjectURL(view.thumbnailBlob), [view.thumbnailBlob])
-  useEffect(() => () => URL.revokeObjectURL(thumbnailUrl), [thumbnailUrl])
+  const thumbnailUrl = useObjectUrl(view.thumbnailBlob)
   const summaryParts = [
     `${view.layers.filter((layer) => layer.visible).length} visible layers`,
     view.popup ? 'popup saved' : undefined,
@@ -53,7 +52,7 @@ function DraftViewRow({
 
   return (
     <li className="video-draft-row">
-      <img src={thumbnailUrl} alt="" />
+      {thumbnailUrl && <img src={thumbnailUrl} alt="" />}
       <div className="video-draft-copy">
         <div className="video-draft-heading">
           <span className="video-draft-position">View {index + 1}</span>

@@ -1,6 +1,7 @@
 import Viewpoint from '@arcgis/core/Viewpoint.js'
 import type { LiveMapSession } from '../../../shared/arcgis/index.ts'
 import { serializeArcGisJson } from '../../../shared/arcgis/index.ts'
+import { createDirectoryStorageReference } from '../../../shared/storage/directory.ts'
 import {
   deletePackage,
   finalizePackage,
@@ -29,7 +30,7 @@ import {
 } from './view-state.ts'
 
 const largeWorkingCaptureBytes = 250 * 1024 * 1024
-const videoReadbackErrorMessage = 'The encoded WebM video could not be read back for verification.'
+const videoReadbackErrorMessage = 'The encoded video could not be read back for verification.'
 const timestampVerificationToleranceMs = 1
 
 interface CaptureOfflineVideoInput {
@@ -62,7 +63,7 @@ function createCleanupError(context: string, error: unknown): Error {
 
 function waitForVideoEvent(
   video: HTMLVideoElement,
-  eventName: 'loadedmetadata' | 'seeked',
+  eventName: 'loadeddata' | 'loadedmetadata' | 'seeked',
   signal: AbortSignal,
 ): Promise<void> {
   signal.throwIfAborted()
@@ -82,7 +83,11 @@ function waitForVideoEvent(
     }
     const handleError = () => {
       cleanup()
-      reject(new Error(videoReadbackErrorMessage))
+      const mediaError = video.error
+      const detail = mediaError
+        ? ` Media error ${mediaError.code}${mediaError.message ? `: ${mediaError.message}` : '.'}`
+        : ''
+      reject(new Error(`${videoReadbackErrorMessage}${detail}`))
     }
 
     signal.addEventListener('abort', handleAbort, { once: true })
@@ -97,6 +102,9 @@ async function readMeasuredDurationMs(
 ): Promise<number> {
   if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
     await waitForVideoEvent(video, 'loadedmetadata', signal)
+  }
+  if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+    await waitForVideoEvent(video, 'loadeddata', signal)
   }
   const durationMs = video.duration * 1_000
   if (!Number.isFinite(durationMs) || durationMs <= 0) {
@@ -166,7 +174,7 @@ async function verifyVideoBlob(
   signal.throwIfAborted()
   const url = URL.createObjectURL(blob)
   const video = document.createElement('video')
-  video.preload = 'metadata'
+  video.preload = 'auto'
 
   try {
     video.src = url
@@ -256,9 +264,21 @@ async function captureTimelineFrames(options: {
   session: LiveMapSession
   signal: AbortSignal
   size: ReturnType<typeof getVideoOutputSize>
+  storage?: Extract<SavedVideoPackage['payloadStorage'], { kind: 'directory' }>
+  thumbnailByScene: Map<string, Blob>
   timeline: ReturnType<typeof createVideoTimeline>
 }): Promise<void> {
-  const { originalState, packageId, progress, session, signal, size, timeline } = options
+  const {
+    originalState,
+    packageId,
+    progress,
+    session,
+    signal,
+    size,
+    storage,
+    thumbnailByScene,
+    timeline,
+  } = options
 
   let captureError: unknown
   try {
@@ -269,14 +289,20 @@ async function captureTimelineFrames(options: {
       signal.throwIfAborted()
       applyLayerStates(session.map, frame.layers)
       await session.view.goTo(Viewpoint.fromJSON(frame.viewpoint), { animate: false })
-      const blob = await takeMapOnlyScreenshot(session.view, size, signal)
-      await putFrame({
-        blob,
-        frameId: `${packageId}:${frame.index}`,
-        index: frame.index,
-        packageId,
-        sceneId: frame.sceneId,
-      })
+      const savedThumbnail = frame.sceneId
+        ? thumbnailByScene.get(frame.sceneId)
+        : undefined
+      const blob = savedThumbnail ?? await takeMapOnlyScreenshot(session.view, size, signal)
+      await putFrame(
+        {
+          blob,
+          frameId: `${packageId}:${frame.index}`,
+          index: frame.index,
+          packageId,
+          sceneId: frame.sceneId,
+        },
+        storage,
+      )
       progress({
         completed: frame.index + 1,
         detail: `Captured frame ${(frame.index + 1).toLocaleString()} of ${timeline.frames.length.toLocaleString()}`,
@@ -323,6 +349,16 @@ export async function captureOfflineVideo({
   const timeline = createVideoTimeline(views)
   const estimate = estimateVideoCapture(views)
   const size = getVideoOutputSize(session.view)
+  const payloadStorage = options.destination
+    ? createDirectoryStorageReference(
+        options.destination,
+        'offline-video',
+        `video-${packageId}`,
+      )
+    : { kind: 'browser' as const }
+  const directoryStorage = payloadStorage.kind === 'directory'
+    ? payloadStorage
+    : undefined
   const captureWarnings = [...warnings]
   if (estimate && estimate.workingBytes >= largeWorkingCaptureBytes) {
     captureWarnings.push({
@@ -341,6 +377,7 @@ export async function captureOfflineVideo({
     item: session.item,
     itemData: session.itemData,
     packageId,
+    payloadStorage,
     scenes: timeline.scenes,
     schemaVersion: VIDEO_PACKAGE_SCHEMA_VERSION,
     state: 'staging',
@@ -360,7 +397,7 @@ export async function captureOfflineVideo({
     })
     for (const asset of assets) {
       options.signal.throwIfAborted()
-      await putAsset({ ...asset, packageId })
+      await putAsset({ ...asset, packageId }, directoryStorage)
     }
 
     await captureTimelineFrames({
@@ -370,6 +407,8 @@ export async function captureOfflineVideo({
       session,
       signal: options.signal,
       size,
+      storage: directoryStorage,
+      thumbnailByScene: new Map(views.map((view) => [view.id, view.thumbnailBlob])),
       timeline,
     })
 
@@ -385,6 +424,7 @@ export async function captureOfflineVideo({
       },
       height: size.height,
       onProgress: options.onProgress,
+      outputStorage: directoryStorage,
       signal: options.signal,
       width: size.width,
     })
@@ -407,7 +447,8 @@ export async function captureOfflineVideo({
       byteSize: encoded.blob.size + views[0].thumbnailBlob.size + assetBytes,
       durationMs: verifiedVideo.durationMs,
       scenes: verifiedVideo.scenes,
-      videoBlob: encoded.blob,
+      videoBlob: directoryStorage ? undefined : encoded.blob,
+      videoFilePath: directoryStorage ? encoded.fileName : undefined,
       videoMimeType: encoded.mimeType,
     })
     options.onProgress({

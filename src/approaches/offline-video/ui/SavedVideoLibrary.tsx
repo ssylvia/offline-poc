@@ -1,5 +1,5 @@
-import { useEffect, useMemo } from 'react'
 import { formatBytes, formatDate } from '../../../shared/format.ts'
+import { useObjectUrl } from '../../../shared/use-object-url.ts'
 import type { SavedVideoPackage } from '../types.ts'
 
 interface SavedVideoLibraryProps {
@@ -18,16 +18,12 @@ function SavedVideoCard({
   packageRecord,
 }: Omit<SavedVideoLibraryProps, 'packages'> & { packageRecord: SavedVideoPackage }) {
   const savedAt = formatDate(packageRecord.completedAt ?? packageRecord.createdAt)
-  const thumbnailUrl = useMemo(
-    () => URL.createObjectURL(packageRecord.thumbnailBlob),
-    [packageRecord.thumbnailBlob],
-  )
-  useEffect(() => () => URL.revokeObjectURL(thumbnailUrl), [thumbnailUrl])
+  const thumbnailUrl = useObjectUrl(packageRecord.thumbnailBlob)
 
   return (
     <article className="saved-map-card saved-video-card">
       <div className="saved-map-thumbnail" aria-hidden="true">
-        <img src={thumbnailUrl} alt="" />
+        {thumbnailUrl && <img src={thumbnailUrl} alt="" />}
         <span className="video-thumbnail-badge">VIDEO</span>
       </div>
       <div className="saved-map-copy">
@@ -110,7 +106,7 @@ export function SavedVideoLibrary({
       </div>
       {packages.length === 0 ? (
         <p className="empty-copy">
-          No offline videos have been captured in this browser.
+          No offline videos have been captured on this device.
         </p>
       ) : packages.map((packageRecord) => (
         <SavedVideoCard
