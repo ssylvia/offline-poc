@@ -29,7 +29,7 @@ export function OfflineMap({
 
   useEffect(() => {
     let disposed = false
-    let cacheActivated = false
+    let cacheActivationId: string | undefined
     let view: MapView | undefined
     const handles: Array<{ remove: () => void }> = []
 
@@ -37,16 +37,15 @@ export function OfflineMap({
       handles.splice(0).forEach((handle) => handle.remove())
       view?.destroy()
       view = undefined
-      if (cacheActivated) {
-        cacheActivated = false
-        deactivatePackageCache()
+      if (cacheActivationId) {
+        deactivatePackageCache(cacheActivationId)
+        cacheActivationId = undefined
       }
     }
 
     const load = async () => {
       setIsLoading(true)
-      await activatePackageCache(packageRecord)
-      cacheActivated = true
+      cacheActivationId = await activatePackageCache(packageRecord)
       if (disposed) {
         releaseResources()
         return

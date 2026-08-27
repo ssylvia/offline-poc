@@ -1,14 +1,10 @@
+import esriConfig from '@arcgis/core/config.js'
+import '@arcgis/core/assets/esri/themes/light/main.css'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { registerSW } from 'virtual:pwa-register'
 import App from './App.tsx'
 
-registerSW({
-  immediate: true,
-  onRegisterError(error) {
-    console.error('The offline service worker could not be registered.', error)
-  },
-})
+esriConfig.assetsPath = `${window.location.origin}${import.meta.env.BASE_URL}arcgis-assets`
 
 const root = document.getElementById('root')
 if (!root) {

@@ -8,12 +8,14 @@ import {
 } from 'workbox-precaching'
 import { NavigationRoute, registerRoute } from 'workbox-routing'
 import { CacheFirst } from 'workbox-strategies'
+import { canonicalizeOfflineResourceUrl } from './shared/arcgis/offline-resource-url.ts'
 
 declare const self: ServiceWorkerGlobalScope & {
   __WB_MANIFEST: Array<{ revision?: string; url: string }>
 }
 
-const runtimeCacheName = `arcgis-sdk-runtime-${__ARCGIS_SDK_VERSION__}`
+const runtimeCacheName = 'arcgis-sdk-runtime'
+const appRuntimeCacheName = 'offline-app-runtime-v1'
 const appShellUrl = `${import.meta.env.BASE_URL}index.html`
 
 interface StoredResource {
@@ -45,6 +47,8 @@ type ActivePackageSource = (
       kind: 'directory'
     }
 ) & {
+  activationId: string
+  activationSequence: number
   resourceByUrl: Map<string, StoredResource>
 }
 
@@ -55,11 +59,21 @@ self.skipWaiting()
 clientsClaim()
 cleanupOutdatedCaches()
 precacheAndRoute(self.__WB_MANIFEST)
-registerRoute(new NavigationRoute(createHandlerBoundToURL(appShellUrl)))
+if (import.meta.env.PROD) {
+  registerRoute(new NavigationRoute(createHandlerBoundToURL(appShellUrl)))
+}
 
 registerRoute(
   ({ url }) => url.origin === self.location.origin && url.pathname.includes('/arcgis-assets/'),
   new CacheFirst({ cacheName: runtimeCacheName }),
+)
+registerRoute(
+  ({ request, url }) => (
+    url.origin === self.location.origin
+    && url.pathname.includes('/assets/')
+    && ['font', 'image', 'script', 'style', 'worker'].includes(request.destination)
+  ),
+  new CacheFirst({ cacheName: appRuntimeCacheName }),
 )
 
 self.addEventListener('message', (event) => {
@@ -67,29 +81,50 @@ self.addEventListener('message', (event) => {
     return
   }
 
-  const message = event.data as { source?: PackageSourceMessage; type?: string }
+  const message = event.data as {
+    activationId?: string
+    activationSequence?: number
+    source?: PackageSourceMessage
+    type?: string
+  }
   const sourceId = event.source && 'id' in event.source ? event.source.id : undefined
 
   if (message.type === 'ACTIVATE_PACKAGE_CACHE' && message.source) {
+    const activationId = message.activationId ?? `legacy:${sourceId ?? 'unknown'}`
+    const activationSequence = message.activationSequence ?? 0
     const activeSource: ActivePackageSource = {
+      activationId,
+      activationSequence,
       ...message.source,
       resourceByUrl: new Map(message.source.resources.map((resource) => (
-        [canonicalizeUrl(resource.url), resource]
+        [canonicalizeOfflineResourceUrl(resource.url), resource]
       ))),
     }
-    if (sourceId) {
+    const currentSource = sourceId
+      ? packageSourceByClient.get(sourceId)
+      : lastActivePackageSource
+    const isStale = currentSource !== undefined
+      && currentSource.activationSequence > activationSequence
+    if (!isStale && sourceId) {
       packageSourceByClient.set(sourceId, activeSource)
     }
-    lastActivePackageSource = activeSource
-    event.ports[0]?.postMessage({ activated: true })
+    if (!isStale) {
+      lastActivePackageSource = activeSource
+    }
+    event.ports[0]?.postMessage({ activated: !isStale })
   }
 
   if (message.type === 'DEACTIVATE_PACKAGE_CACHE') {
-    if (sourceId) {
+    const clientSource = sourceId ? packageSourceByClient.get(sourceId) : undefined
+    const releaseClientSource = !message.activationId
+      || clientSource?.activationId === message.activationId
+    if (sourceId && releaseClientSource) {
       packageSourceByClient.delete(sourceId)
     }
-    if (!sourceId || packageSourceByClient.size === 0) {
-      lastActivePackageSource = undefined
+    const releaseLastSource = !message.activationId
+      || lastActivePackageSource?.activationId === message.activationId
+    if (releaseLastSource) {
+      lastActivePackageSource = [...packageSourceByClient.values()].at(-1)
     }
   }
 })
@@ -111,7 +146,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith((async () => {
-    const canonicalUrl = canonicalizeUrl(request.url)
+    const canonicalUrl = canonicalizeOfflineResourceUrl(request.url)
     const resource = packageSource.resourceByUrl.get(canonicalUrl)
     if (packageSource.kind === 'directory' && resource?.path) {
       const file = await readDirectoryFile(packageSource.directory, resource.path)
@@ -146,19 +181,6 @@ self.addEventListener('fetch', (event) => {
     }
   })())
 })
-
-function canonicalizeUrl(value: string): string {
-  const url = new URL(value)
-  url.hash = ''
-  const entries = [...url.searchParams.entries()].sort(([leftKey, leftValue], [rightKey, rightValue]) => (
-    leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue)
-  ))
-  url.search = ''
-  for (const [key, value] of entries) {
-    url.searchParams.append(key, value)
-  }
-  return url.href
-}
 
 async function readDirectoryFile(
   root: FileSystemDirectoryHandle,

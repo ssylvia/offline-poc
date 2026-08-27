@@ -1,4 +1,5 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SavedMapPackage } from '../types.ts'
 
@@ -68,7 +69,7 @@ const packageRecord: SavedMapPackage = {
 
 describe('OfflineMap', () => {
   beforeEach(() => {
-    mocks.activatePackageCache.mockReset().mockResolvedValue(undefined)
+    mocks.activatePackageCache.mockReset().mockResolvedValue('activation-1')
     mocks.buildOfflineWebMap.mockReset()
     mocks.deactivatePackageCache.mockReset()
   })
@@ -89,7 +90,7 @@ describe('OfflineMap', () => {
       expect(onError).toHaveBeenCalledWith('Stored map data is corrupt')
     })
     expect(mocks.activatePackageCache).toHaveBeenCalledWith(packageRecord)
-    expect(mocks.deactivatePackageCache).toHaveBeenCalledOnce()
+    expect(mocks.deactivatePackageCache).toHaveBeenCalledWith('activation-1')
     expect(screen.queryByRole('status')).toBeNull()
 
     rendered.unmount()
@@ -97,8 +98,8 @@ describe('OfflineMap', () => {
   })
 
   it('deactivates a cache that finishes activating after unmount', async () => {
-    let finishActivation: (() => void) | undefined
-    mocks.activatePackageCache.mockReturnValue(new Promise<void>((resolve) => {
+    let finishActivation: ((activationId: string) => void) | undefined
+    mocks.activatePackageCache.mockReturnValue(new Promise<string>((resolve) => {
       finishActivation = resolve
     }))
 
@@ -112,12 +113,48 @@ describe('OfflineMap', () => {
     rendered.unmount()
 
     await act(async () => {
-      finishActivation?.()
+      finishActivation?.('activation-after-unmount')
     })
 
     await waitFor(() => {
-      expect(mocks.deactivatePackageCache).toHaveBeenCalledOnce()
+      expect(mocks.deactivatePackageCache).toHaveBeenCalledWith(
+        'activation-after-unmount',
+      )
     })
     expect(mocks.buildOfflineWebMap).not.toHaveBeenCalled()
+  })
+
+  it('does not let stale Strict Mode cleanup deactivate the current package', async () => {
+    const activationResolvers: Array<(activationId: string) => void> = []
+    mocks.activatePackageCache.mockImplementation(() => (
+      new Promise<string>((resolve) => activationResolvers.push(resolve))
+    ))
+    mocks.buildOfflineWebMap.mockReturnValue(new Promise(() => {}))
+
+    const rendered = render(
+      <StrictMode>
+        <OfflineMap
+          onCoverageChange={vi.fn()}
+          onError={vi.fn()}
+          packageRecord={packageRecord}
+        />
+      </StrictMode>,
+    )
+    await waitFor(() => {
+      expect(mocks.activatePackageCache).toHaveBeenCalledTimes(2)
+    })
+
+    await act(async () => {
+      activationResolvers[1]?.('current-activation')
+      activationResolvers[0]?.('stale-activation')
+    })
+
+    await waitFor(() => {
+      expect(mocks.deactivatePackageCache).toHaveBeenCalledWith('stale-activation')
+    })
+    expect(mocks.deactivatePackageCache).not.toHaveBeenCalledWith('current-activation')
+
+    rendered.unmount()
+    expect(mocks.deactivatePackageCache).toHaveBeenCalledWith('current-activation')
   })
 })

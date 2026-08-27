@@ -64,7 +64,11 @@ Package metadata stays in browser-managed storage on the current device. Payload
 
 Folder handles are remembered when the browser permits it. A browser may require the user to reconnect the folder after a restart or permission change. Existing browser-backed packages remain readable after a folder is selected.
 
-The production service worker precaches the application shell, lazy application chunks, required ArcGIS localization/icons, geometry assets, and ArcGIS worker chunks. After the initial online load and package download, saved routes can be hard-refreshed offline.
+The production service worker installs from a small application-shell precache, takes control before
+the main application loads, and then runtime-caches the application chunks and ArcGIS assets that
+the live workflow actually uses. After the initial online load and package download, saved routes
+can be hard-refreshed offline without making service-worker installation depend on thousands of
+atomic network requests.
 
 There is no server sync or cross-device restore flow in this prototype. Moving or deleting a selected package folder outside the application makes its package unavailable.
 

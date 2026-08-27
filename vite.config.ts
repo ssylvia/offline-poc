@@ -30,37 +30,6 @@ function collectAssetFiles(root: string, directory = root): Array<{ path: string
 }
 
 const arcgisAssetFiles = collectAssetFiles(arcgisAssetsRoot)
-const defaultLocalePattern = /\/t9n\/.+(?<!_[a-z]{2}(?:-[a-z]{2})?)\.json$/i
-const offlineWidgetIconNames = new Set([
-  'chevronDown16.json',
-  'chevronLeft16.json',
-  'chevronRight16.json',
-  'contract16.json',
-  'dockBottom16.json',
-  'dockLeft16.json',
-  'dockRight16.json',
-  'ellipsis16.json',
-  'expand16.json',
-  'magnifyingGlassPlus16.json',
-  'minus16.json',
-  'plus16.json',
-  'x16.json',
-])
-const offlineArcGisAssets = arcgisAssetFiles
-  .filter((file) => (
-    file.path.endsWith('_en.json')
-    || defaultLocalePattern.test(`/${file.path}`)
-    || (
-      file.path.startsWith('components/assets/icon/')
-      && offlineWidgetIconNames.has(file.path.split('/').at(-1) ?? '')
-    )
-    || file.path.startsWith('esri/core/workers/')
-    || file.path.startsWith('esri/geometry/')
-  ))
-  .map((file) => ({
-    revision: `${arcgisPackage.version}-${file.size}`,
-    url: withBasePath(`arcgis-assets/${file.path}`),
-  }))
 
 function arcgisRuntimeManifest(): Plugin {
   let source = ''
@@ -115,6 +84,7 @@ export default defineConfig({
     }),
     VitePWA({
       strategies: 'injectManifest',
+      injectRegister: null,
       srcDir: 'src',
       filename: 'service-worker.ts',
       registerType: 'autoUpdate',
@@ -152,9 +122,14 @@ export default defineConfig({
         ],
       },
       injectManifest: {
-        additionalManifestEntries: offlineArcGisAssets,
-        globPatterns: ['**/*.{js,css,html,svg,png,webmanifest,json,woff,woff2,ttf,wasm}'],
-        globIgnores: ['arcgis-assets/**/*'],
+        globPatterns: [
+          'index.html',
+          'manifest.webmanifest',
+          'favicon.svg',
+          'icons.svg',
+          'assets/index-*.js',
+          'assets/index-*.css',
+        ],
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
       },
       devOptions: {

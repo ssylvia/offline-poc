@@ -1,12 +1,39 @@
 import { getPackageDirectory } from '../../../shared/storage/directory.ts'
 import type { SavedMapPackage } from '../types.ts'
 
-export async function activatePackageCache(packageRecord: SavedMapPackage): Promise<void> {
-  const registration = await navigator.serviceWorker.ready
+const serviceWorkerReadyTimeoutMs = 15_000
+let nextActivationSequence = 0
+
+async function getReadyRegistration(): Promise<ServiceWorkerRegistration> {
+  let timeout: number | undefined
+  try {
+    return await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise<never>((_resolve, reject) => {
+        timeout = window.setTimeout(() => {
+          reject(new Error(
+            'The offline service worker could not finish installing. Reload while online and try again.',
+          ))
+        }, serviceWorkerReadyTimeoutMs)
+      }),
+    ])
+  } finally {
+    if (timeout !== undefined) {
+      window.clearTimeout(timeout)
+    }
+  }
+}
+
+export async function activatePackageCache(
+  packageRecord: SavedMapPackage,
+): Promise<string> {
+  const registration = await getReadyRegistration()
   const worker = navigator.serviceWorker.controller ?? registration.active
   if (!worker) {
     throw new Error('The offline service worker is not active yet. Reload and try again.')
   }
+  const activationId = crypto.randomUUID()
+  const activationSequence = Date.now() * 1_000 + (++nextActivationSequence % 1_000)
 
   await new Promise<void>((resolve, reject) => {
     const channel = new MessageChannel()
@@ -33,7 +60,12 @@ export async function activatePackageCache(packageRecord: SavedMapPackage): Prom
             resources: packageRecord.resources ?? [],
           }
       worker.postMessage(
-        { type: 'ACTIVATE_PACKAGE_CACHE', source },
+        {
+          activationId,
+          activationSequence,
+          type: 'ACTIVATE_PACKAGE_CACHE',
+          source,
+        },
         [channel.port2],
       )
     })().catch((error: unknown) => {
@@ -42,8 +74,12 @@ export async function activatePackageCache(packageRecord: SavedMapPackage): Prom
       reject(error)
     })
   })
+  return activationId
 }
 
-export function deactivatePackageCache(): void {
-  navigator.serviceWorker.controller?.postMessage({ type: 'DEACTIVATE_PACKAGE_CACHE' })
+export function deactivatePackageCache(activationId: string): void {
+  navigator.serviceWorker.controller?.postMessage({
+    activationId,
+    type: 'DEACTIVATE_PACKAGE_CACHE',
+  })
 }
