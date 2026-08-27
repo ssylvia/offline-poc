@@ -80,4 +80,43 @@ describe('SavedVideoLibrary', () => {
     expect(createObjectURL).toHaveBeenCalledTimes(2)
     expect(revokeObjectURL).toHaveBeenCalledTimes(2)
   })
+
+  it('lists package and view-specific capture warnings', () => {
+    const packageRecord = createPackage('package-warning')
+    packageRecord.scenes = [{
+      holdEndMs: 1_500,
+      holdStartMs: 0,
+      id: 'scene-1',
+      index: 0,
+      layers: [],
+      name: 'Downtown',
+      timestampMs: 750,
+      transitionStartMs: 0,
+      viewpoint: {},
+    }]
+    packageRecord.warnings = [{
+      code: 'popup-asset-unavailable',
+      message: 'The attachment could not be downloaded.',
+      viewId: 'scene-1',
+    }, {
+      code: 'large-capture',
+      message: 'Temporary storage exceeded 250 MB.',
+    }]
+
+    render(
+      <SavedVideoLibrary
+        packages={[packageRecord]}
+        onDelete={vi.fn()}
+        onExport={vi.fn()}
+        onOpen={vi.fn()}
+        onRecapture={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('View 2 capture warnings')).toBeInTheDocument()
+    expect(screen.getByText('View 1: Downtown')).toBeInTheDocument()
+    expect(screen.getByText('The attachment could not be downloaded.')).toBeInTheDocument()
+    expect(screen.getByText('Package warning')).toBeInTheDocument()
+    expect(screen.getByText('Temporary storage exceeded 250 MB.')).toBeInTheDocument()
+  })
 })

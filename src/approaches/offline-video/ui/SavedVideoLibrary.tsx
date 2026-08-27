@@ -19,6 +19,7 @@ function SavedVideoCard({
 }: Omit<SavedVideoLibraryProps, 'packages'> & { packageRecord: SavedVideoPackage }) {
   const savedAt = formatDate(packageRecord.completedAt ?? packageRecord.createdAt)
   const thumbnailUrl = useObjectUrl(packageRecord.thumbnailBlob)
+  const sceneById = new Map(packageRecord.scenes.map((scene) => [scene.id, scene]))
 
   return (
     <article className="saved-map-card saved-video-card">
@@ -52,6 +53,32 @@ function SavedVideoCard({
           </div>
         </dl>
         <p>Saved {savedAt}</p>
+        {packageRecord.warnings.length > 0 && (
+          <details className="package-warning-details">
+            <summary>
+              View {packageRecord.warnings.length} capture warning
+              {packageRecord.warnings.length === 1 ? '' : 's'}
+            </summary>
+            <ul>
+              {packageRecord.warnings.map((warning, index) => {
+                const scene = warning.viewId ? sceneById.get(warning.viewId) : undefined
+                return (
+                  <li key={`${warning.code}:${warning.viewId ?? 'package'}:${index}`}>
+                    <strong>{warning.code.replaceAll('-', ' ')}</strong>
+                    <span>
+                      {scene
+                        ? `View ${scene.index + 1}: ${scene.name}`
+                        : warning.viewId
+                          ? `Captured view ${warning.viewId}`
+                          : 'Package warning'}
+                    </span>
+                    <p>{warning.message}</p>
+                  </li>
+                )
+              })}
+            </ul>
+          </details>
+        )}
         <div className="card-actions">
           <button
             type="button"

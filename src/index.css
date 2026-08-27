@@ -640,6 +640,53 @@ button:disabled {
   white-space: nowrap;
 }
 
+.package-warning-details {
+  margin-top: 8px;
+  border: 1px solid #e4b96b;
+  border-radius: 7px;
+  background: #fff8e8;
+}
+
+.package-warning-details summary {
+  padding: 7px 8px;
+  color: #805313;
+  cursor: pointer;
+  font-size: 0.66rem;
+  font-weight: 800;
+}
+
+.package-warning-details ul {
+  margin: 0;
+  padding: 0 8px 8px 25px;
+}
+
+.package-warning-details li {
+  margin-top: 6px;
+  color: var(--navy);
+  font-size: 0.65rem;
+}
+
+.package-warning-details li strong,
+.package-warning-details li span {
+  display: block;
+}
+
+.package-warning-details li strong {
+  text-transform: capitalize;
+}
+
+.package-warning-details li span {
+  margin-top: 1px;
+  color: #805313;
+  font-size: 0.6rem;
+  text-transform: capitalize;
+}
+
+.saved-map-copy .package-warning-details li p {
+  margin-top: 3px;
+  color: #59400f;
+}
+
 .card-actions {
   margin-top: 8px;
   display: flex;

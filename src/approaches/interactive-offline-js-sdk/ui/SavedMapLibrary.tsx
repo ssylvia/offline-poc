@@ -17,9 +17,9 @@ function SavedMapCard({
 }: Omit<SavedMapLibraryProps, 'packages'> & { packageRecord: SavedMapPackage }) {
   const thumbnailUrl = useObjectUrl(packageRecord.thumbnailBlob)
 
-  const limitationCount = packageRecord.compatibility.filter(
+  const limitations = packageRecord.compatibility.filter(
     (result) => result.level !== 'supported',
-  ).length
+  )
 
   return (
     <article className="saved-map-card">
@@ -37,8 +37,21 @@ function SavedMapCard({
           {packageRecord.featureCount.toLocaleString()} features
         </p>
         <p>Saved {formatDate(packageRecord.completedAt ?? packageRecord.createdAt)}</p>
-        {limitationCount > 0 && (
-          <p className="warning-text">{limitationCount} known offline limitation(s)</p>
+        {limitations.length > 0 && (
+          <details className="package-warning-details">
+            <summary>
+              View {limitations.length} known offline limitation{limitations.length === 1 ? '' : 's'}
+            </summary>
+            <ul>
+              {limitations.map((limitation) => (
+                <li key={`${limitation.id}:${limitation.level}`}>
+                  <strong>{limitation.title}</strong>
+                  <span>{limitation.type} · {limitation.level}</span>
+                  <p>{limitation.message}</p>
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
         <div className="card-actions">
           <button type="button" className="button button-small" onClick={() => onOpen(packageRecord)}>
