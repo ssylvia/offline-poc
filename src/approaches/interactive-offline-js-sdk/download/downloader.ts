@@ -32,6 +32,25 @@ import { snapshotWebMapJson } from './preflight.ts'
 const featureBatchSize = 500
 const resourceConcurrency = 6
 
+function createResourceRequest(url: string): Request {
+  const requestUrl = new URL(url)
+  requestUrl.hash = ''
+  return new Request(requestUrl, {
+    credentials: 'omit',
+    mode: 'cors',
+  })
+}
+
+export async function findMissingCachedResourceUrls(
+  cache: Pick<Cache, 'match'>,
+  urls: string[],
+): Promise<string[]> {
+  const results = await Promise.all(urls.map(async (url) => (
+    await cache.match(createResourceRequest(url)) ? undefined : url
+  )))
+  return results.filter((url): url is string => url !== undefined)
+}
+
 function asJsonObject(value: JsonValue | undefined): JsonObject | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value
@@ -228,10 +247,7 @@ async function downloadResources(
       currentIndex += 1
       options.signal.throwIfAborted()
 
-      const request = new Request(resource.url, {
-        credentials: 'omit',
-        mode: 'cors',
-      })
+      const request = createResourceRequest(resource.url)
       const response = await fetch(request, { signal: options.signal })
       if (!response.ok) {
         throw new Error(
@@ -327,10 +343,13 @@ async function verifyPackage(
     }
   } else {
     const cache = await caches.open(packageRecord.cacheName)
-    const cachedRequests = await cache.keys()
-    if (cachedRequests.length !== report.resourceUrls.length) {
+    const missingUrls = await findMissingCachedResourceUrls(
+      cache,
+      report.resourceUrls.map((resource) => resource.url),
+    )
+    if (missingUrls.length > 0) {
       throw new Error(
-        `Offline verification found ${cachedRequests.length} of ${report.resourceUrls.length} cached resources.`,
+        `Offline verification could not read ${missingUrls.length} of ${report.resourceUrls.length} cached resources. First missing URL: ${missingUrls[0]}`,
       )
     }
   }

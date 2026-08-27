@@ -9,6 +9,7 @@ const arcgisPackage = JSON.parse(
   readFileSync(resolve('node_modules/@arcgis/core/package.json'), 'utf8'),
 ) as { version: string }
 const arcgisAssetsRoot = resolve('node_modules/@arcgis/core/assets')
+const appBuildId = process.env.GITHUB_SHA ?? `local-${Date.now()}`
 const basePath = `/${(process.env.VITE_BASE_PATH ?? '').replace(/^\/+|\/+$/g, '')}${process.env.VITE_BASE_PATH ? '/' : ''}`
 
 function withBasePath(path = ''): string {
@@ -66,15 +67,48 @@ function arcgisRuntimeManifest(): Plugin {
   }
 }
 
+function offlineAppRuntimeManifest(): Plugin {
+  return {
+    name: 'offline-app-runtime-manifest',
+    generateBundle(_options, bundle) {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'offline-app-runtime-manifest.json',
+        source: JSON.stringify({
+          buildId: appBuildId,
+          files: Object.keys(bundle)
+            .filter((fileName) => fileName.startsWith('assets/'))
+            .sort(),
+        }),
+      })
+    },
+  }
+}
+
 // https://vite.dev/config/
 export default defineConfig({
   base: basePath,
+  build: {
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [{
+            includeDependenciesRecursively: false,
+            name: 'arcgis',
+            test: /node_modules[\\/]@arcgis[\\/]core/,
+          }],
+        },
+      },
+    },
+  },
   define: {
+    __APP_BUILD_ID__: JSON.stringify(appBuildId),
     __ARCGIS_SDK_VERSION__: JSON.stringify(arcgisPackage.version),
   },
   plugins: [
     react(),
     arcgisRuntimeManifest(),
+    offlineAppRuntimeManifest(),
     viteStaticCopy({
       targets: [{
         src: 'node_modules/@arcgis/core/assets/**/*',
@@ -125,6 +159,7 @@ export default defineConfig({
         globPatterns: [
           'index.html',
           'manifest.webmanifest',
+          'offline-app-runtime-manifest.json',
           'favicon.svg',
           'icons.svg',
           'assets/index-*.js',

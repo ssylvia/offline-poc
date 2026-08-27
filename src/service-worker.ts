@@ -14,8 +14,12 @@ declare const self: ServiceWorkerGlobalScope & {
   __WB_MANIFEST: Array<{ revision?: string; url: string }>
 }
 
-const runtimeCacheName = 'arcgis-sdk-runtime'
+const runtimeCachePrefix = 'arcgis-sdk-runtime-'
+const runtimeCacheName = import.meta.env.DEV
+  ? `${runtimeCachePrefix}development`
+  : `${runtimeCachePrefix}${__ARCGIS_SDK_VERSION__}`
 const appRuntimeCacheName = 'offline-app-runtime-v1'
+const appBuildId = import.meta.env.DEV ? 'development' : __APP_BUILD_ID__
 const appShellUrl = `${import.meta.env.BASE_URL}index.html`
 
 interface StoredResource {
@@ -84,6 +88,8 @@ self.addEventListener('message', (event) => {
   const message = event.data as {
     activationId?: string
     activationSequence?: number
+    buildId?: string
+    retainedUrls?: string[]
     source?: PackageSourceMessage
     type?: string
   }
@@ -126,6 +132,35 @@ self.addEventListener('message', (event) => {
     if (releaseLastSource) {
       lastActivePackageSource = [...packageSourceByClient.values()].at(-1)
     }
+  }
+
+  if (
+    message.type === 'PRUNE_RUNTIME_CACHES'
+    && message.buildId === appBuildId
+    && Array.isArray(message.retainedUrls)
+  ) {
+    event.waitUntil((async () => {
+      const windowClients = await self.clients.matchAll({
+        includeUncontrolled: true,
+        type: 'window',
+      })
+      if (windowClients.length !== 1) {
+        return
+      }
+
+      const retainedUrls = new Set(message.retainedUrls)
+      const appCache = await caches.open(appRuntimeCacheName)
+      for (const request of await appCache.keys()) {
+        if (!retainedUrls.has(request.url)) {
+          await appCache.delete(request)
+        }
+      }
+      for (const cacheName of await caches.keys()) {
+        if (cacheName.startsWith(runtimeCachePrefix) && cacheName !== runtimeCacheName) {
+          await caches.delete(cacheName)
+        }
+      }
+    })())
   }
 })
 
