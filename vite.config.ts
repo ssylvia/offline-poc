@@ -9,6 +9,11 @@ const arcgisPackage = JSON.parse(
   readFileSync(resolve('node_modules/@arcgis/core/package.json'), 'utf8'),
 ) as { version: string }
 const arcgisAssetsRoot = resolve('node_modules/@arcgis/core/assets')
+const basePath = `/${(process.env.VITE_BASE_PATH ?? '').replace(/^\/+|\/+$/g, '')}${process.env.VITE_BASE_PATH ? '/' : ''}`
+
+function withBasePath(path = ''): string {
+  return `${basePath}${path.replace(/^\/+/, '')}`
+}
 
 function collectAssetFiles(root: string, directory = root): Array<{ path: string; size: number }> {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -54,7 +59,7 @@ const offlineArcGisAssets = arcgisAssetFiles
   ))
   .map((file) => ({
     revision: `${arcgisPackage.version}-${file.size}`,
-    url: `/arcgis-assets/${file.path}`,
+    url: withBasePath(`arcgis-assets/${file.path}`),
   }))
 
 function arcgisRuntimeManifest(): Plugin {
@@ -63,7 +68,7 @@ function arcgisRuntimeManifest(): Plugin {
   const createSource = () => {
     return JSON.stringify({
       sdkVersion: arcgisPackage.version,
-      basePath: '/arcgis-assets/',
+      basePath: withBasePath('arcgis-assets/'),
       fileCount: arcgisAssetFiles.length,
       totalBytes: arcgisAssetFiles.reduce((total, file) => total + file.size, 0),
       files: arcgisAssetFiles,
@@ -94,6 +99,7 @@ function arcgisRuntimeManifest(): Plugin {
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: basePath,
   define: {
     __ARCGIS_SDK_VERSION__: JSON.stringify(arcgisPackage.version),
   },
@@ -120,25 +126,25 @@ export default defineConfig({
         theme_color: '#16324f',
         background_color: '#f4f7fa',
         display: 'standalone',
-        scope: '/',
-        start_url: '/',
+        scope: basePath,
+        start_url: basePath,
         shortcuts: [
           {
             name: 'Interactive snapshot',
             short_name: 'Snapshot',
             description: 'Open the bounded interactive offline snapshot workflow.',
-            url: '/',
+            url: basePath,
           },
           {
             name: 'Offline video package',
             short_name: 'Video',
             description: 'Open the popup-aware offline video package workflow.',
-            url: '/?approach=offline-video',
+            url: `${basePath}?approach=offline-video`,
           },
         ],
         icons: [
           {
-            src: '/favicon.svg',
+            src: withBasePath('favicon.svg'),
             sizes: 'any',
             type: 'image/svg+xml',
             purpose: 'any maskable',

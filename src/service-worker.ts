@@ -14,6 +14,7 @@ declare const self: ServiceWorkerGlobalScope & {
 }
 
 const runtimeCacheName = `arcgis-sdk-runtime-${__ARCGIS_SDK_VERSION__}`
+const appShellUrl = `${import.meta.env.BASE_URL}index.html`
 
 interface StoredResource {
   contentType: string
@@ -54,7 +55,7 @@ self.skipWaiting()
 clientsClaim()
 cleanupOutdatedCaches()
 precacheAndRoute(self.__WB_MANIFEST)
-registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html')))
+registerRoute(new NavigationRoute(createHandlerBoundToURL(appShellUrl)))
 
 registerRoute(
   ({ url }) => url.origin === self.location.origin && url.pathname.includes('/arcgis-assets/'),

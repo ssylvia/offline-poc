@@ -12,6 +12,16 @@ npm install
 npm run dev
 ```
 
+## Deploy to GitHub Pages
+
+The `Deploy GitHub Pages` workflow builds and deploys the site whenever a commit is pushed. It can
+also be started manually from the repository Actions page.
+
+Before the first deployment, set the repository's **Settings → Pages → Build and deployment**
+source to **GitHub Actions**. The workflow automatically builds with the repository subpath, so the
+application shell, service worker, PWA shortcuts, and ArcGIS runtime assets work from
+`https://<owner>.github.io/<repository>/`.
+
 ## Routes
 
 Open the interactive snapshot workflow:
