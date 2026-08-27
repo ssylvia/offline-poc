@@ -99,3 +99,57 @@ export function dataUrlToBlob(dataUrl: string): Blob {
     throw new Error('The captured map frame could not be decoded.', { cause: error })
   }
 }
+
+export async function crossFadeImageBlobs(
+  source: Blob,
+  destination: Blob,
+  size: VideoOutputSize,
+  progress: number,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  if (!Number.isFinite(progress) || progress < 0 || progress > 1) {
+    throw new Error('Cross-fade progress must be between zero and one.')
+  }
+  signal?.throwIfAborted()
+  if (progress === 0) {
+    return source
+  }
+  if (progress === 1) {
+    return destination
+  }
+
+  const [sourceBitmap, destinationBitmap] = await Promise.all([
+    createImageBitmap(source),
+    createImageBitmap(destination),
+  ])
+  signal?.throwIfAborted()
+  const canvas = document.createElement('canvas')
+  canvas.width = size.width
+  canvas.height = size.height
+  const context = canvas.getContext('2d', { alpha: false })
+  if (!context) {
+    sourceBitmap.close()
+    destinationBitmap.close()
+    throw new Error('The browser could not create a zoom cross-fade canvas.')
+  }
+
+  try {
+    context.globalAlpha = 1
+    context.drawImage(sourceBitmap, 0, 0, size.width, size.height)
+    context.globalAlpha = progress
+    context.drawImage(destinationBitmap, 0, 0, size.width, size.height)
+    signal?.throwIfAborted()
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve(blob)
+        } else {
+          reject(new Error('The zoom cross-fade frame could not be encoded.'))
+        }
+      }, 'image/png')
+    })
+  } finally {
+    sourceBitmap.close()
+    destinationBitmap.close()
+  }
+}

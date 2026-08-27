@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   createVideoTimeline: vi.fn(),
+  crossFadeImageBlobs: vi.fn(),
   deletePackage: vi.fn(),
   encodeVideoFrames: vi.fn(),
   finalizePackage: vi.fn(),
@@ -46,6 +47,7 @@ vi.mock('./view-state.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./view-state.ts')>()
   return {
     ...actual,
+    crossFadeImageBlobs: mocks.crossFadeImageBlobs,
     getVideoOutputSize: mocks.getVideoOutputSize,
     takeMapOnlyScreenshot: mocks.takeMapOnlyScreenshot,
   }
@@ -69,6 +71,7 @@ function createTimelinePlan() {
           { id: 'roads', opacity: 1, title: 'Roads', visible: true },
           { id: 'labels', opacity: 0.25, title: 'Labels', visible: false },
         ],
+        phase: 'hold',
         sceneId: 'scene-1',
         timeMs: 0,
         viewpoint: { id: 'scene-1' },
@@ -79,15 +82,30 @@ function createTimelinePlan() {
           { id: 'roads', opacity: 1, title: 'Roads', visible: true },
           { id: 'labels', opacity: 1, title: 'Labels', visible: true },
         ],
+        phase: 'pan',
         timeMs: 1_000,
         viewpoint: { id: 'transition-1' },
       },
       {
         index: 2,
+        crossFadeFromSceneId: 'scene-1',
+        crossFadeProgress: 0.5,
+        crossFadeToSceneId: 'scene-2',
         layers: [
           { id: 'roads', opacity: 0.5, title: 'Roads', visible: false },
           { id: 'labels', opacity: 1, title: 'Labels', visible: true },
         ],
+        phase: 'zoom-crossfade',
+        timeMs: 1_500,
+        viewpoint: { id: 'scene-2' },
+      },
+      {
+        index: 3,
+        layers: [
+          { id: 'roads', opacity: 0.5, title: 'Roads', visible: false },
+          { id: 'labels', opacity: 1, title: 'Labels', visible: true },
+        ],
+        phase: 'hold',
         sceneId: 'scene-2',
         timeMs: 2_000,
         viewpoint: { id: 'scene-2' },
@@ -232,6 +250,9 @@ describe('captureOfflineVideo', () => {
     vi.clearAllMocks()
     frameStore.clear()
     mocks.createVideoTimeline.mockReturnValue(createTimelinePlan())
+    mocks.crossFadeImageBlobs.mockResolvedValue(
+      new Blob(['cross-fade'], { type: 'image/png' }),
+    )
     mocks.deletePackage.mockResolvedValue(undefined)
     mocks.finalizePackage.mockImplementation(async (packageRecord) => ({
       ...packageRecord,
@@ -270,7 +291,7 @@ describe('captureOfflineVideo', () => {
     const session = createSession()
     const { seekedTimesMs } = installVerifiedVideo(2.4)
     mocks.encodeVideoFrames.mockImplementation(async ({ frameCount, getFrame }) => {
-      expect(frameCount).toBe(3)
+      expect(frameCount).toBe(4)
       expect(session.view.popup.visible).toBe(true)
       expect(session.map.allLayers.toArray()).toMatchObject([
         { id: 'roads', opacity: 0.2, visible: false },
@@ -281,7 +302,8 @@ describe('captureOfflineVideo', () => {
         getFrame(0).then((blob: Blob) => blob.text()),
         getFrame(1).then((blob: Blob) => blob.text()),
         getFrame(2).then((blob: Blob) => blob.text()),
-      ])).toEqual(['thumbnail', 'capture-1', 'thumbnail'])
+        getFrame(3).then((blob: Blob) => blob.text()),
+      ])).toEqual(['thumbnail', 'capture-1', 'cross-fade', 'thumbnail'])
       return {
         blob: new Blob(['video'], { type: 'video/webm' }),
         mimeType: 'video/webm',
@@ -324,8 +346,17 @@ describe('captureOfflineVideo', () => {
     expect(mocks.putFrame.mock.calls.map(([frame]) => frame.sceneId)).toEqual([
       'scene-1',
       undefined,
+      undefined,
       'scene-2',
     ])
+    expect(mocks.takeMapOnlyScreenshot).toHaveBeenCalledOnce()
+    expect(mocks.crossFadeImageBlobs).toHaveBeenCalledWith(
+      expect.any(Blob),
+      expect.any(Blob),
+      { height: 720, width: 1_280 },
+      0.5,
+      expect.any(AbortSignal),
+    )
     const finalizedPackage = mocks.finalizePackage.mock.calls[0]?.[0]
     expect(finalizedPackage?.durationMs).toBe(2_400)
     expect(finalizedPackage?.scenes).toMatchObject([
@@ -369,7 +400,7 @@ describe('captureOfflineVideo', () => {
       views: [{
         capturedAt: 1,
         extent: { xmin: 0, ymin: 0, xmax: 1, ymax: 1 },
-        id: 'view-1',
+        id: 'scene-1',
         layers: [],
         name: 'View 1',
         thumbnailBlob: new Blob(['thumbnail']),

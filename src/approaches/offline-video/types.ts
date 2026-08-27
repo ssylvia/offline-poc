@@ -6,7 +6,7 @@ import type {
 
 export const VIDEO_PACKAGE_SCHEMA_VERSION = 1
 export const VIDEO_CAPTURE_FRAME_RATE = 24
-export const VIDEO_FINAL_VIEW_HOLD_MS = 1_500
+export const VIDEO_FINAL_VIEW_HOLD_MS = 3_000
 
 export type VideoPackageState = 'staging' | 'complete'
 

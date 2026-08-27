@@ -278,6 +278,7 @@ export function OfflineVideoPlayer({
   const videoRef = useRef<HTMLVideoElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
   const [currentTimeMs, setCurrentTimeMs] = useState(0)
+  const [navigationTargetIndex, setNavigationTargetIndex] = useState<number>()
   const [contentRect, setContentRect] = useState<MediaContentRect>({
     height: 0,
     left: 0,
@@ -314,23 +315,75 @@ export function OfflineVideoPlayer({
   const activeSceneIndex = activeScene?.index ?? packageRecord.scenes.findLastIndex(
     (scene) => currentTimeMs >= scene.timestampMs,
   )
+  const displayedSceneIndex = navigationTargetIndex ?? activeSceneIndex
 
-  const seekToScene = useCallback((scene: VideoTimelineScene) => {
+  const stopAtScene = useCallback((
+    video: HTMLVideoElement,
+    scene: VideoTimelineScene,
+  ) => {
+    video.pause()
+    video.currentTime = scene.timestampMs / 1_000
+    setCurrentTimeMs(scene.timestampMs)
+    setNavigationTargetIndex(undefined)
+  }, [])
+
+  const navigateToScene = useCallback((scene: VideoTimelineScene) => {
     const video = videoRef.current
     if (!video) {
       return
     }
-    const targetTime = scene.timestampMs / 1_000
-    if (Math.abs(video.currentTime - targetTime) >= 0.001) {
-      video.addEventListener('seeked', () => {
-        video.pause()
-        setCurrentTimeMs(video.currentTime * 1_000)
-      }, { once: true })
+    if (scene.index <= activeSceneIndex) {
+      stopAtScene(video, scene)
+      return
     }
-    video.pause()
-    video.currentTime = targetTime
-    setCurrentTimeMs(scene.timestampMs)
-  }, [])
+
+    const currentScene = activeScene ?? packageRecord.scenes[activeSceneIndex]
+    setNavigationTargetIndex(scene.index)
+    if (
+      currentScene
+      && video.currentTime * 1_000 < currentScene.holdEndMs
+    ) {
+      video.currentTime = currentScene.holdEndMs / 1_000
+      setCurrentTimeMs(currentScene.holdEndMs)
+    }
+    void video.play().catch(() => {
+      setNavigationTargetIndex(undefined)
+      onError('The saved video could not play the transition to the selected view.')
+    })
+  }, [activeScene, activeSceneIndex, onError, packageRecord.scenes, stopAtScene])
+
+  const handleTimeUpdate = useCallback((video: HTMLVideoElement) => {
+    const nextTimeMs = video.currentTime * 1_000
+    setCurrentTimeMs(nextTimeMs)
+    if (navigationTargetIndex === undefined) {
+      return
+    }
+    const targetScene = packageRecord.scenes[navigationTargetIndex]
+    if (!targetScene) {
+      setNavigationTargetIndex(undefined)
+      return
+    }
+    const frameToleranceMs = 1_000 / Math.max(1, packageRecord.frameRate)
+    if (nextTimeMs >= targetScene.holdStartMs - frameToleranceMs) {
+      stopAtScene(video, targetScene)
+      return
+    }
+
+    const intermediateHold = packageRecord.scenes.find((scene) => (
+      scene.index < targetScene.index
+      && nextTimeMs >= scene.holdStartMs
+      && nextTimeMs < scene.holdEndMs
+    ))
+    if (intermediateHold) {
+      video.currentTime = intermediateHold.holdEndMs / 1_000
+      setCurrentTimeMs(intermediateHold.holdEndMs)
+    }
+  }, [
+    navigationTargetIndex,
+    packageRecord.frameRate,
+    packageRecord.scenes,
+    stopAtScene,
+  ])
 
   if (!packageRecord.videoBlob) {
     return (
@@ -346,15 +399,20 @@ export function OfflineVideoPlayer({
       <div className="map-empty">
         <span className="spinner" aria-hidden="true" />
         <h2>Preparing saved video…</h2>
-        <p>The local WebM data is being prepared for playback.</p>
+        <p>The local video data is being prepared for playback.</p>
       </div>
     )
   }
 
-  const popup = activeScene?.popup
+  const popup = navigationTargetIndex === undefined ? activeScene?.popup : undefined
   const popupLayout = popup ? getPopupCardStyle(popup, contentRect) : undefined
-  const sceneSummary = activeScene
-    ? `View ${activeScene.index + 1} of ${packageRecord.scenes.length}: ${activeScene.name}`
+  const navigationTarget = navigationTargetIndex === undefined
+    ? undefined
+    : packageRecord.scenes[navigationTargetIndex]
+  const sceneSummary = navigationTarget
+    ? `Moving to view ${navigationTarget.index + 1}: ${navigationTarget.name}`
+    : activeScene
+      ? `View ${activeScene.index + 1} of ${packageRecord.scenes.length}: ${activeScene.name}`
     : `Ready to jump to any of ${packageRecord.scenes.length} saved views.`
 
   return (
@@ -367,9 +425,18 @@ export function OfflineVideoPlayer({
           src={videoUrl}
           aria-label={`${packageRecord.item.title} offline video`}
           onError={() => onError('The saved offline video could not be played.')}
-          onEnded={() => setCurrentTimeMs(packageRecord.durationMs)}
+          onEnded={(event) => {
+            const targetScene = navigationTargetIndex === undefined
+              ? undefined
+              : packageRecord.scenes[navigationTargetIndex]
+            if (targetScene) {
+              stopAtScene(event.currentTarget, targetScene)
+            } else {
+              setCurrentTimeMs(packageRecord.durationMs)
+            }
+          }}
           onSeeked={(event) => setCurrentTimeMs(event.currentTarget.currentTime * 1_000)}
-          onTimeUpdate={(event) => setCurrentTimeMs(event.currentTarget.currentTime * 1_000)}
+          onTimeUpdate={(event) => handleTimeUpdate(event.currentTarget)}
         >
           <track kind="captions" />
         </video>
@@ -389,8 +456,10 @@ export function OfflineVideoPlayer({
         <button
           type="button"
           className="button button-secondary button-small"
-          disabled={activeSceneIndex <= 0}
-          onClick={() => seekToScene(packageRecord.scenes[Math.max(0, activeSceneIndex - 1)])}
+          disabled={navigationTargetIndex !== undefined || displayedSceneIndex <= 0}
+          onClick={() => navigateToScene(
+            packageRecord.scenes[Math.max(0, displayedSceneIndex - 1)],
+          )}
           aria-label="Go to the previous captured view"
         >
           Previous view
@@ -400,10 +469,11 @@ export function OfflineVideoPlayer({
             <button
               key={scene.id}
               type="button"
-              className={scene.id === activeScene?.id ? 'is-active' : undefined}
-              aria-current={scene.id === activeScene?.id ? 'true' : undefined}
+              className={scene.index === displayedSceneIndex ? 'is-active' : undefined}
+              aria-current={scene.index === displayedSceneIndex ? 'true' : undefined}
               aria-label={`Go to view ${scene.index + 1}: ${scene.name}`}
-              onClick={() => seekToScene(scene)}
+              disabled={navigationTargetIndex !== undefined}
+              onClick={() => navigateToScene(scene)}
             >
               {scene.index + 1}. {scene.name}
             </button>
@@ -412,9 +482,14 @@ export function OfflineVideoPlayer({
         <button
           type="button"
           className="button button-secondary button-small"
-          disabled={activeSceneIndex >= packageRecord.scenes.length - 1}
-          onClick={() => seekToScene(
-            packageRecord.scenes[Math.min(packageRecord.scenes.length - 1, activeSceneIndex + 1)],
+          disabled={
+            navigationTargetIndex !== undefined
+            || displayedSceneIndex >= packageRecord.scenes.length - 1
+          }
+          onClick={() => navigateToScene(
+            packageRecord.scenes[
+              Math.min(packageRecord.scenes.length - 1, displayedSceneIndex + 1)
+            ],
           )}
           aria-label="Go to the next captured view"
         >

@@ -25,6 +25,7 @@ import { encodeVideoFrames } from './video-encoder.ts'
 import {
   applyLayerStates,
   captureLayerStates,
+  crossFadeImageBlobs,
   getVideoOutputSize,
   takeMapOnlyScreenshot,
 } from './view-state.ts'
@@ -281,18 +282,65 @@ async function captureTimelineFrames(options: {
   } = options
 
   let captureError: unknown
+  let activeCrossFadeDestination: string | undefined
+  let crossFadeSource: Blob | undefined
+  let lastRenderedBlob: Blob | undefined
   try {
     if (originalState.popup) {
       originalState.popup.visible = false
     }
     for (const frame of timeline.frames) {
       signal.throwIfAborted()
-      applyLayerStates(session.map, frame.layers)
-      await session.view.goTo(Viewpoint.fromJSON(frame.viewpoint), { animate: false })
-      const savedThumbnail = frame.sceneId
-        ? thumbnailByScene.get(frame.sceneId)
-        : undefined
-      const blob = savedThumbnail ?? await takeMapOnlyScreenshot(session.view, size, signal)
+      const phase = frame.phase ?? (frame.sceneId ? 'hold' : 'pan')
+      let blob: Blob
+      if (phase === 'hold') {
+        const savedThumbnail = frame.sceneId
+          ? thumbnailByScene.get(frame.sceneId)
+          : undefined
+        if (!savedThumbnail) {
+          if (frame.phase) {
+            throw new Error(`The final image for video frame ${frame.index + 1} is missing.`)
+          }
+          applyLayerStates(session.map, frame.layers)
+          await session.view.goTo(Viewpoint.fromJSON(frame.viewpoint), { animate: false })
+          blob = await takeMapOnlyScreenshot(session.view, size, signal)
+        } else {
+          blob = savedThumbnail
+        }
+        activeCrossFadeDestination = undefined
+        crossFadeSource = undefined
+      } else if (phase === 'zoom-crossfade') {
+        if (
+          !frame.crossFadeFromSceneId
+          || !frame.crossFadeToSceneId
+          || frame.crossFadeProgress === undefined
+        ) {
+          throw new Error(`Zoom cross-fade frame ${frame.index + 1} is incomplete.`)
+        }
+        if (activeCrossFadeDestination !== frame.crossFadeToSceneId) {
+          crossFadeSource = lastRenderedBlob
+            ?? thumbnailByScene.get(frame.crossFadeFromSceneId)
+          activeCrossFadeDestination = frame.crossFadeToSceneId
+        }
+        const destination = thumbnailByScene.get(frame.crossFadeToSceneId)
+        if (!crossFadeSource || !destination) {
+          throw new Error(`Zoom cross-fade frame ${frame.index + 1} is missing an endpoint image.`)
+        }
+        blob = await crossFadeImageBlobs(
+          crossFadeSource,
+          destination,
+          size,
+          frame.crossFadeProgress,
+          signal,
+        )
+      } else {
+        activeCrossFadeDestination = undefined
+        crossFadeSource = undefined
+        applyLayerStates(session.map, frame.layers)
+        await session.view.goTo(Viewpoint.fromJSON(frame.viewpoint), { animate: false })
+        blob = await takeMapOnlyScreenshot(session.view, size, signal)
+      }
+      lastRenderedBlob = blob
       await putFrame(
         {
           blob,
@@ -305,7 +353,13 @@ async function captureTimelineFrames(options: {
       )
       progress({
         completed: frame.index + 1,
-        detail: `Captured frame ${(frame.index + 1).toLocaleString()} of ${timeline.frames.length.toLocaleString()}`,
+        detail: `${
+          phase === 'pan'
+            ? 'Captured pan'
+            : phase === 'zoom-crossfade'
+              ? 'Generated zoom cross-fade'
+              : 'Staged final-view hold'
+        } frame ${(frame.index + 1).toLocaleString()} of ${timeline.frames.length.toLocaleString()}`,
         phase: 'frames',
         total: timeline.frames.length,
       })

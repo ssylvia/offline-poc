@@ -25,7 +25,7 @@ function createPackage(): SavedVideoPackage {
     byteSize: 1_024,
     createdAt: 1,
     durationMs: 1_000,
-    frameRate: 10,
+    frameRate: 24,
     height: 900,
     item: {
       access: 'public',
@@ -274,8 +274,9 @@ describe('OfflineVideoPlayer', () => {
     expect(screen.queryByRole('dialog', { name: 'Pop up title' })).not.toBeInTheDocument()
   })
 
-  it('pauses and seeks to previous, next, and direct scene targets and revokes object URLs on cleanup', () => {
+  it('plays forward to the next stop and seeks backward to a previous stop', () => {
     const pauseSpy = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+    const playSpy = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue()
     const { unmount } = render(
       <OfflineVideoPlayer
         assets={createAssets()}
@@ -286,29 +287,71 @@ describe('OfflineVideoPlayer', () => {
 
     const video = screen.getByLabelText('Accessible popup tour offline video')
 
-    currentTimeSeconds = 0.7
+    currentTimeSeconds = 0.2
     fireEvent.timeUpdate(video)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go to the next captured view' }))
+    expect(playSpy).toHaveBeenCalledOnce()
+    expect(currentTimeSeconds).toBe(0.4)
+    expect(screen.getByText('Moving to view 2: Harbor')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Pop up title' })).not.toBeInTheDocument()
+
+    currentTimeSeconds = 0.66
+    fireEvent.timeUpdate(video)
+    expect(currentTimeSeconds).toBe(0.7)
+    expect(pauseSpy).toHaveBeenCalled()
     expect(screen.getByRole('button', { name: 'Go to view 2: Harbor' })).toHaveAttribute('aria-current', 'true')
 
     fireEvent.click(screen.getByRole('button', { name: 'Go to the previous captured view' }))
-    expect(pauseSpy).toHaveBeenCalled()
     expect(currentTimeSeconds).toBe(0.2)
-    fireEvent(video, new Event('seeked'))
-    expect(screen.getByRole('button', { name: 'Go to view 1: Downtown' })).toHaveAttribute('aria-current', 'true')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Go to the next captured view' }))
-    expect(currentTimeSeconds).toBe(0.7)
-    fireEvent(video, new Event('seeked'))
-    expect(screen.getByRole('button', { name: 'Go to view 2: Harbor' })).toHaveAttribute('aria-current', 'true')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Go to view 1: Downtown' }))
-    expect(currentTimeSeconds).toBe(0.2)
-    fireEvent(video, new Event('seeked'))
     expect(screen.getByRole('button', { name: 'Go to view 1: Downtown' })).toHaveAttribute('aria-current', 'true')
 
     unmount()
     expect(createObjectURL).toHaveBeenCalledTimes(4)
     expect(revokeObjectURL).toHaveBeenCalledTimes(4)
+  })
+
+  it('skips intermediate view holds and keeps popups hidden during multi-view navigation', () => {
+    const packageRecord = createPackage()
+    packageRecord.durationMs = 1_600
+    packageRecord.scenes.push({
+      holdEndMs: 1_500,
+      holdStartMs: 1_200,
+      id: 'scene-3',
+      index: 2,
+      layers: [],
+      name: 'Airport',
+      timestampMs: 1_300,
+      transitionStartMs: 900,
+      viewpoint: {},
+    })
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+    const playSpy = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue()
+    render(
+      <OfflineVideoPlayer
+        assets={createAssets()}
+        onError={vi.fn()}
+        packageRecord={packageRecord}
+      />,
+    )
+    const video = screen.getByLabelText('Accessible popup tour offline video')
+    currentTimeSeconds = 0.2
+    fireEvent.timeUpdate(video)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go to view 3: Airport' }))
+    expect(playSpy).toHaveBeenCalledOnce()
+    expect(currentTimeSeconds).toBe(0.4)
+    expect(screen.queryByRole('dialog', { name: 'Pop up title' })).not.toBeInTheDocument()
+
+    currentTimeSeconds = 0.7
+    fireEvent.timeUpdate(video)
+    expect(currentTimeSeconds).toBe(0.9)
+    expect(screen.queryByRole('dialog', { name: 'Harbor popup' })).not.toBeInTheDocument()
+
+    currentTimeSeconds = 1.21
+    fireEvent.timeUpdate(video)
+    expect(currentTimeSeconds).toBe(1.3)
+    expect(screen.getByText('View 3 of 3: Airport')).toBeInTheDocument()
   })
 
   it('recreates object URLs after Strict Mode cleanup instead of using a revoked video URL', () => {

@@ -7,23 +7,19 @@ import {
   type VideoTimelineScene,
 } from '../types.ts'
 
-const minimumTransitionMs = 900
-const maximumTransitionMs = 6_000
+const minimumPanSeconds = 1.5
+const maximumPanSeconds = 8
+const panSecondsPerViewportWidth = 2.25
+const minimumZoomSeconds = 1
+const maximumZoomSeconds = 3
+const zoomSecondsPerStop = 0.65
 const nominalViewportWidthPixels = 960
 const metersPerPixelAtScaleOne = 0.0002645833333333333
+const movementTolerance = 1e-9
 
 interface PointLike {
   x: number
   y: number
-}
-
-export function easeElasticPan(progress: number): number {
-  if (progress === 0 || progress === 1) {
-    return progress
-  }
-  const smoothProgress = progress * progress * (3 - 2 * progress)
-  const spring = Math.sin(progress * Math.PI * 4) * Math.pow(1 - progress, 2) * 0.08
-  return Math.min(1.04, Math.max(-0.04, smoothProgress + spring))
 }
 
 export function easeInOutCubic(progress: number): number {
@@ -40,8 +36,12 @@ interface ExtentLike {
 }
 
 export interface VideoTimelineFrame {
+  crossFadeFromSceneId?: string
+  crossFadeProgress?: number
+  crossFadeToSceneId?: string
   index: number
   layers: CapturedLayerState[]
+  phase: 'hold' | 'pan' | 'zoom-crossfade'
   sceneId?: string
   timeMs: number
   viewpoint: JsonObject
@@ -101,10 +101,33 @@ function interpolateRotation(source: number, destination: number, progress: numb
   return (source + delta * progress + 360) % 360
 }
 
-export function calculateTransitionDurationMs(
-  source: Pick<VideoDraftView, 'extent' | 'viewpoint'>,
-  destination: Pick<VideoDraftView, 'extent' | 'viewpoint'>,
-): number {
+function layersMatch(
+  source: CapturedLayerState[],
+  destination: CapturedLayerState[],
+): boolean {
+  if (source.length !== destination.length) {
+    return false
+  }
+  return source.every((sourceLayer) => {
+    const destinationLayer = destination.find((layer) => layer.id === sourceLayer.id)
+    return destinationLayer?.visible === sourceLayer.visible
+      && destinationLayer.opacity === sourceLayer.opacity
+  })
+}
+
+export interface TransitionFrameCounts {
+  pan: number
+  zoomCrossFade: number
+}
+
+export function calculateTransitionFrameCounts(
+  source: Pick<VideoDraftView, 'extent' | 'layers' | 'viewpoint'>,
+  destination: Pick<VideoDraftView, 'extent' | 'layers' | 'viewpoint'>,
+  frameRate = VIDEO_CAPTURE_FRAME_RATE,
+): TransitionFrameCounts {
+  if (!Number.isFinite(frameRate) || frameRate <= 0) {
+    throw new Error('Video frame rate must be greater than zero.')
+  }
   const sourceCenter = readPoint(source.viewpoint)
   const destinationCenter = readPoint(destination.viewpoint)
   const sourceExtent = readExtent(source.extent)
@@ -116,14 +139,42 @@ export function calculateTransitionDurationMs(
     destinationCenter.x - sourceCenter.x,
     destinationCenter.y - sourceCenter.y,
   ) / averageViewportWidth
+  const sourceRotation = finiteNumber(source.viewpoint.rotation) ?? 0
+  const destinationRotation = finiteNumber(destination.viewpoint.rotation) ?? 0
+  const rotationDelta = Math.abs(((destinationRotation - sourceRotation + 540) % 360) - 180)
+  const hasPan = panInViewportWidths > movementTolerance || rotationDelta > movementTolerance
   const zoomStops = Math.abs(Math.log2(
     readScale(destination.viewpoint) / readScale(source.viewpoint),
   ))
-  const duration = 900 + panInViewportWidths * 650 + zoomStops * 450
-  return Math.min(maximumTransitionMs, Math.max(minimumTransitionMs, Math.round(duration)))
+  const needsCrossFade = zoomStops > movementTolerance
+    || !layersMatch(source.layers, destination.layers)
+
+  const panSeconds = Math.min(
+    maximumPanSeconds,
+    Math.max(minimumPanSeconds, minimumPanSeconds + panInViewportWidths * panSecondsPerViewportWidth),
+  )
+  const zoomSeconds = Math.min(
+    maximumZoomSeconds,
+    Math.max(minimumZoomSeconds, minimumZoomSeconds + zoomStops * zoomSecondsPerStop),
+  )
+  return {
+    pan: hasPan ? Math.max(1, Math.round(panSeconds * frameRate)) : 0,
+    zoomCrossFade: needsCrossFade
+      ? Math.max(1, Math.round(zoomSeconds * frameRate))
+      : 0,
+  }
 }
 
-export function interpolateViewpoint(
+export function calculateTransitionDurationMs(
+  source: Pick<VideoDraftView, 'extent' | 'layers' | 'viewpoint'>,
+  destination: Pick<VideoDraftView, 'extent' | 'layers' | 'viewpoint'>,
+  frameRate = VIDEO_CAPTURE_FRAME_RATE,
+): number {
+  const frameCounts = calculateTransitionFrameCounts(source, destination, frameRate)
+  return (frameCounts.pan + frameCounts.zoomCrossFade) / frameRate * 1_000
+}
+
+export function interpolatePanViewpoint(
   source: JsonObject,
   destination: JsonObject,
   progress: number,
@@ -135,11 +186,9 @@ export function interpolateViewpoint(
   const sourcePoint = readPoint(source)
   const destinationPoint = readPoint(destination)
   const sourceScale = readScale(source)
-  const destinationScale = readScale(destination)
   const sourceRotation = finiteNumber(source.rotation) ?? 0
   const destinationRotation = finiteNumber(destination.rotation) ?? 0
-  const panProgress = easeElasticPan(progress)
-  const zoomProgress = easeInOutCubic(progress)
+  const panProgress = easeInOutCubic(progress)
   const targetGeometry = destination.targetGeometry
   if (!targetGeometry || typeof targetGeometry !== 'object' || Array.isArray(targetGeometry)) {
     throw new Error('A captured viewpoint is missing its target geometry.')
@@ -148,7 +197,7 @@ export function interpolateViewpoint(
   return {
     ...destination,
     rotation: interpolateRotation(sourceRotation, destinationRotation, panProgress),
-    scale: sourceScale * Math.pow(destinationScale / sourceScale, zoomProgress),
+    scale: sourceScale,
     targetGeometry: {
       ...targetGeometry,
       x: sourcePoint.x + (destinationPoint.x - sourcePoint.x) * panProgress,
@@ -198,15 +247,37 @@ export function createVideoTimeline(
     const transitionStartMs = elapsedMs
 
     if (previousView) {
-      const transitionMs = calculateTransitionDurationMs(previousView, view)
-      const transitionFrameCount = Math.max(1, Math.ceil(transitionMs / frameDurationMs))
-      for (let index = 0; index < transitionFrameCount; index += 1) {
-        const progress = (index + 1) / transitionFrameCount
+      const transitionFrames = calculateTransitionFrameCounts(
+        previousView,
+        view,
+        frameRate,
+      )
+      for (let index = 0; index < transitionFrames.pan; index += 1) {
+        const progress = (index + 1) / transitionFrames.pan
         frames.push({
           index: frames.length,
-          layers: cloneLayers(progress < 0.5 ? previousView.layers : view.layers),
+          layers: cloneLayers(previousView.layers),
+          phase: 'pan',
           timeMs: elapsedMs,
-          viewpoint: interpolateViewpoint(previousView.viewpoint, view.viewpoint, progress),
+          viewpoint: interpolatePanViewpoint(
+            previousView.viewpoint,
+            view.viewpoint,
+            progress,
+          ),
+        })
+        elapsedMs += frameDurationMs
+      }
+      for (let index = 0; index < transitionFrames.zoomCrossFade; index += 1) {
+        const progress = (index + 1) / transitionFrames.zoomCrossFade
+        frames.push({
+          crossFadeFromSceneId: previousView.id,
+          crossFadeProgress: progress,
+          crossFadeToSceneId: view.id,
+          index: frames.length,
+          layers: cloneLayers(view.layers),
+          phase: 'zoom-crossfade',
+          timeMs: elapsedMs,
+          viewpoint: view.viewpoint,
         })
         elapsedMs += frameDurationMs
       }
@@ -217,6 +288,7 @@ export function createVideoTimeline(
       frames.push({
         index: frames.length,
         layers: cloneLayers(view.layers),
+        phase: 'hold',
         sceneId: view.id,
         timeMs: elapsedMs,
         viewpoint: view.viewpoint,
@@ -267,8 +339,12 @@ export function estimateVideoCapture(
 }
 
 export const videoTimingConstants = {
-  maximumTransitionMs,
-  minimumTransitionMs,
+  maximumPanSeconds,
+  maximumZoomSeconds,
+  minimumPanSeconds,
+  minimumZoomSeconds,
   nominalViewportWidthPixels,
+  panSecondsPerViewportWidth,
   metersPerPixelAtScaleOne,
+  zoomSecondsPerStop,
 }

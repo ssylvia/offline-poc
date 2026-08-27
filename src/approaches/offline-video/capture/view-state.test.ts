@@ -1,7 +1,16 @@
-import { describe, expect, it } from 'vitest'
-import { applyLayerStates, dataUrlToBlob } from './view-state.ts'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  applyLayerStates,
+  crossFadeImageBlobs,
+  dataUrlToBlob,
+} from './view-state.ts'
 
 describe('offline video view state', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
   it('decodes base64 and percent-encoded screenshot data without fetching', async () => {
     const png = dataUrlToBlob('data:image/png;base64,aGVsbG8=')
     const text = dataUrlToBlob('data:text/plain,hello%20world')
@@ -14,6 +23,46 @@ describe('offline video view state', () => {
   it('rejects malformed screenshot data URLs', () => {
     expect(() => dataUrlToBlob('https://example.test/frame.png')).toThrow('valid data URL')
     expect(() => dataUrlToBlob('data:image/png;base64,%%%')).toThrow('could not be decoded')
+  })
+
+  it('cross-fades two images without rendering intermediate map zooms', async () => {
+    const globalAlphaValues: number[] = []
+    const drawImage = vi.fn()
+    const context = {
+      drawImage,
+      set globalAlpha(value: number) {
+        globalAlphaValues.push(value)
+      },
+    }
+    const canvas = {
+      getContext: vi.fn(() => context),
+      height: 0,
+      toBlob: vi.fn((callback: BlobCallback) => {
+        callback(new Blob(['cross-fade'], { type: 'image/png' }))
+      }),
+      width: 0,
+    }
+    const bitmaps = [
+      { close: vi.fn() },
+      { close: vi.fn() },
+    ]
+    vi.stubGlobal('createImageBitmap', vi.fn()
+      .mockResolvedValueOnce(bitmaps[0])
+      .mockResolvedValueOnce(bitmaps[1]))
+    vi.spyOn(document, 'createElement').mockReturnValue(canvas as never)
+
+    const result = await crossFadeImageBlobs(
+      new Blob(['source']),
+      new Blob(['destination']),
+      { height: 720, width: 1_280 },
+      0.25,
+    )
+
+    expect(canvas).toMatchObject({ height: 720, width: 1_280 })
+    expect(globalAlphaValues).toEqual([1, 0.25])
+    expect(drawImage).toHaveBeenCalledTimes(2)
+    expect(await result.text()).toBe('cross-fade')
+    expect(bitmaps.every((bitmap) => bitmap.close.mock.calls.length === 1)).toBe(true)
   })
 
   it('validates every captured layer before mutating the map', () => {
