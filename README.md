@@ -95,12 +95,18 @@ Use `?approach=offline-video` to capture final views in playback order. Each sav
 - export as **two files**: `<name>.mp4` or `<name>.webm`, plus `<name>.json`
 
 Transitions are timed directly at **24 FPS**. Pan, rotation, zoom, and layer visibility/opacity
-changes share one eased transition clock so movement stays in phase. During zooms, the renderer uses
-the current detail level while taking temporary intermediate screenshots for the next detail level,
-then blends across those detail boundaries with short cross-fades. Zoom-out transitions use
-destination/detail captures while shrinking so edges stay filled. Final views hold for three
-seconds, and their frames reuse the already captured final image. Offline playback hides native video
-controls and exposes only map-like saved-view navigation.
+changes share one eased transition clock so movement stays in phase. Each zoom detail level has its
+own capture timeline: all needed frames at one level are captured before the next level begins.
+Layer toggles are rendered by interpolating ArcGIS layer opacity in the capture MapView, while zoom
+timelines include their stretch/contract animation and cross-fade only at aligned detail boundaries.
+This prevents endpoint tiles from flashing back during multi-level zooms. Final views hold for three
+seconds.
+
+Video settings use a fixed, browser-independent capture viewport (Full HD by default, configurable
+from 640×360 through 3840×2160 with even dimensions). A dedicated offscreen MapView renders that
+viewport, so resizing the authoring interface does not change the saved video. Offline playback fills
+the map canvas, hides native video controls, and provides map-style Home, Previous, Play/Pause, Next,
+and saved-view controls over the video.
 
 There is no hard-coded view limit, but larger view counts and larger map viewports increase duration and temporary working storage. The UI warns once estimated temporary working storage reaches roughly **250 MB**, and capture can still fail earlier or later depending on browser quota/performance.
 

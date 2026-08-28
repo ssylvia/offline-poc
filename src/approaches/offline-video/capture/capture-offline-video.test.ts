@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   putAsset: vi.fn(),
   putFrame: vi.fn(),
   putPackage: vi.fn(),
+  resizeCaptureViewport: vi.fn(),
   takeMapOnlyScreenshot: vi.fn(),
   viewpointFromJson: vi.fn((json: unknown) => ({ json })),
 }))
@@ -331,6 +332,7 @@ describe('captureOfflineVideo', () => {
     const { captureView, session } = createSession()
     mocks.createVideoCaptureViewport.mockResolvedValue({
       destroy: mocks.destroyCaptureViewport,
+      resize: mocks.resizeCaptureViewport,
       view: captureView,
     })
     mocks.takeMapOnlyScreenshot.mockImplementation(async () => new Blob([
@@ -381,10 +383,18 @@ describe('captureOfflineVideo', () => {
       { height: 1_080, width: 1_920 },
       expect.any(AbortSignal),
     )
-    const capturedViewpoints = mocks.takeMapOnlyScreenshot.mock.calls.map(
-      () => undefined,
+    expect(mocks.resizeCaptureViewport).toHaveBeenCalledWith(
+      { height: 1_296, width: 2_304 },
+      expect.any(AbortSignal),
     )
-    expect(capturedViewpoints).toHaveLength(5)
+    expect(mocks.takeMapOnlyScreenshot).toHaveBeenCalledTimes(5)
+    expect(mocks.takeMapOnlyScreenshot.mock.calls.map(([, captureSize]) => captureSize)).toEqual([
+      { height: 1_080, width: 1_920 },
+      { height: 1_080, width: 1_920 },
+      { height: 1_296, width: 2_304 },
+      { height: 1_296, width: 2_304 },
+      { height: 1_296, width: 2_304 },
+    ])
     expect(captureView.goTo.mock.calls.map(
       ([viewpoint]) => (viewpoint as { json: { scale: number } }).json.scale,
     )).toEqual([
@@ -426,6 +436,7 @@ describe('captureOfflineVideo', () => {
     const { captureView, session } = createSession()
     mocks.createVideoCaptureViewport.mockResolvedValue({
       destroy: mocks.destroyCaptureViewport,
+      resize: mocks.resizeCaptureViewport,
       view: captureView,
     })
     mocks.takeMapOnlyScreenshot.mockRejectedValueOnce(new Error('frame capture failed'))

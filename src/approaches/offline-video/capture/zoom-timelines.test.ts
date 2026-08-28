@@ -3,8 +3,10 @@ import type { VideoDraftView } from '../types.ts'
 import type { VideoTimelineFrame } from './timeline.ts'
 import {
   createZoomTimelinePlan,
+  getZoomTimelineCaptureSize,
   interpolateLayerStates,
   planZoomDetailSteps,
+  zoomTimelineConstants,
 } from './zoom-timelines.ts'
 
 function createView(
@@ -69,6 +71,10 @@ describe('zoom-level video timelines', () => {
       { endProgress: 2 / 3, fromScale: 4_000, startProgress: 1 / 3, toScale: 2_000 },
       { endProgress: 1, fromScale: 2_000, startProgress: 2 / 3, toScale: 1_000 },
     ])
+    expect(getZoomTimelineCaptureSize({ height: 1_080, width: 1_920 })).toEqual({
+      height: 1_296,
+      width: 2_304,
+    })
   })
 
   it('groups captures by zoom level and never reuses endpoint images for middle levels', () => {
@@ -118,6 +124,11 @@ describe('zoom-level video timelines', () => {
     const output = plan.outputFrames[0]
 
     expect(output?.contributions).toHaveLength(2)
+    const contributionRatios = output?.contributions.map((contribution) => {
+      const timeline = plan.timelines.find((entry) => entry.id === contribution.timelineId)
+      return contribution.imageScale / (timeline?.scale ?? 1)
+    })
+    expect(contributionRatios?.[0]).toBeCloseTo(contributionRatios?.[1] ?? 0)
     const captures = output?.contributions.map((contribution) => {
       const timeline = plan.timelines.find((entry) => entry.id === contribution.timelineId)
       return timeline?.captures.find((capture) => capture.captureId === contribution.captureId)
@@ -153,6 +164,8 @@ describe('zoom-level video timelines', () => {
 
     expect(output?.contributions).toHaveLength(1)
     expect(output?.contributions[0]?.timelineId).toBe('zoom-1')
-    expect(output?.contributions[0]?.imageScale).toBeCloseTo(Math.SQRT2)
+    expect(output?.contributions[0]?.imageScale).toBeCloseTo(
+      zoomTimelineConstants.overscan * Math.SQRT2,
+    )
   })
 })

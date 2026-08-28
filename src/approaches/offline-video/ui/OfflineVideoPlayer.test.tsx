@@ -340,6 +340,12 @@ describe('OfflineVideoPlayer', () => {
     )
     fireEvent.click(screen.getByRole('button', { name: 'Pause map tour' }))
     expect(pauseSpy).toHaveBeenCalledTimes(2)
+
+    fireEvent.ended(video)
+    expect(currentTimeSeconds).toBe(0.7)
+    fireEvent.click(screen.getByRole('button', { name: 'Play map tour' }))
+    expect(currentTimeSeconds).toBe(0)
+    expect(playSpy).toHaveBeenCalledTimes(2)
   })
 
   it('skips intermediate view holds and keeps popups hidden during multi-view navigation', () => {

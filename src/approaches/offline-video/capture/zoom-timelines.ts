@@ -1,8 +1,13 @@
 import type { JsonObject } from '../../../shared/arcgis/index.ts'
-import type { CapturedLayerState, VideoDraftView } from '../types.ts'
+import type {
+  CapturedLayerState,
+  VideoDraftView,
+  VideoOutputSize,
+} from '../types.ts'
 import type { VideoTimelineFrame } from './timeline.ts'
 
 const zoomTimelineFadePortion = 0.18
+const zoomTimelineOverscan = 1.2
 
 export interface ZoomDetailStep {
   endProgress: number
@@ -133,6 +138,13 @@ function cloneLayers(layers: CapturedLayerState[]): CapturedLayerState[] {
   return layers.map((layer) => ({ ...layer }))
 }
 
+export function getZoomTimelineCaptureSize(size: VideoOutputSize): VideoOutputSize {
+  return {
+    height: Math.ceil(size.height * zoomTimelineOverscan / 2) * 2,
+    width: Math.ceil(size.width * zoomTimelineOverscan / 2) * 2,
+  }
+}
+
 export function createZoomTimelinePlan(
   frames: VideoTimelineFrame[],
   source: Pick<VideoDraftView, 'layers' | 'viewpoint'>,
@@ -191,8 +203,10 @@ export function createZoomTimelinePlan(
       ? cloneLayers(source.layers)
       : interpolateLayerStates(source.layers, destination.layers, frame.layerProgress)
     if (steps.length === 0) {
+      const contribution = addCapture(0, frame, layers)
+      contribution.imageScale = zoomTimelineOverscan
       return {
-        contributions: [addCapture(0, frame, layers)],
+        contributions: [contribution],
         index: frame.index,
       }
     }
@@ -223,11 +237,12 @@ export function createZoomTimelinePlan(
       )
       if (fadeProgress < 1) {
         const sourceContribution = addCapture(stepIndex, frame, layers)
-        sourceContribution.imageScale = step.fromScale / targetScale
+        sourceContribution.imageScale = zoomTimelineOverscan * step.fromScale / targetScale
         contributions.push(sourceContribution)
       }
       if (fadeProgress > 0) {
         const destinationContribution = addCapture(stepIndex + 1, frame, layers)
+        destinationContribution.imageScale = zoomTimelineOverscan * step.toScale / targetScale
         destinationContribution.opacity = fadeProgress
         contributions.push(destinationContribution)
       }
@@ -238,11 +253,12 @@ export function createZoomTimelinePlan(
       )
       if (fadeProgress > 0) {
         const destinationContribution = addCapture(stepIndex + 1, frame, layers)
-        destinationContribution.imageScale = step.toScale / targetScale
+        destinationContribution.imageScale = zoomTimelineOverscan * step.toScale / targetScale
         contributions.push(destinationContribution)
       }
       if (fadeProgress < 1) {
         const sourceContribution = addCapture(stepIndex, frame, layers)
+        sourceContribution.imageScale = zoomTimelineOverscan * step.fromScale / targetScale
         sourceContribution.opacity = 1 - fadeProgress
         contributions.push(sourceContribution)
       }
@@ -259,4 +275,5 @@ export function createZoomTimelinePlan(
 
 export const zoomTimelineConstants = {
   fadePortion: zoomTimelineFadePortion,
+  overscan: zoomTimelineOverscan,
 }

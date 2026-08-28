@@ -106,6 +106,7 @@ export interface VideoDraftView {
   extent: JsonObject
   id: string
   layers: CapturedLayerState[]
+  mapViewportSize?: VideoOutputSize
   name: string
   popup?: CapturedPopup
   thumbnailBlob: Blob

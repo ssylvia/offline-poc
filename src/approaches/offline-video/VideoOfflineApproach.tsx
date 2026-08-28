@@ -343,6 +343,19 @@ export function VideoOfflineApproach({
     return () => captureController.current?.abort()
   }, [])
 
+  useEffect(() => {
+    if (!isCapturing) {
+      return
+    }
+    const abortCapture = () => captureController.current?.abort()
+    window.addEventListener('beforeunload', abortCapture)
+    window.addEventListener('popstate', abortCapture)
+    return () => {
+      window.removeEventListener('beforeunload', abortCapture)
+      window.removeEventListener('popstate', abortCapture)
+    }
+  }, [isCapturing])
+
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault()
     const normalized = normalizeWebMapId(inputValue)
@@ -425,6 +438,10 @@ export function VideoOfflineApproach({
         extent: serializeArcGisJson(liveSession.view.extent),
         id: nextViewId,
         layers: captureLayerStates(liveSession.map),
+        mapViewportSize: {
+          height: liveSession.view.height,
+          width: liveSession.view.width,
+        },
         name: existingView?.name ?? `View ${draftViews.length + 1}`,
         popup: popupResult.popup,
         thumbnailBlob,
@@ -597,10 +614,17 @@ export function VideoOfflineApproach({
                 inputMode="text"
                 placeholder="32-character item ID"
                 spellCheck="false"
+                disabled={isCapturing || isRecordingView}
                 value={inputValue}
                 onChange={(event) => setInputValue(event.target.value)}
               />
-              <button type="submit" className="button">Load</button>
+              <button
+                type="submit"
+                className="button"
+                disabled={isCapturing || isRecordingView}
+              >
+                Load
+              </button>
             </div>
           </form>
           <p className="muted-copy">
@@ -736,6 +760,7 @@ export function VideoOfflineApproach({
         </section>
 
         <SavedVideoLibrary
+          disabled={isCapturing || isRecordingView}
           packages={savedPackages}
           onDelete={(packageRecord) => void removeSaved(packageRecord)}
           onExport={(packageRecord) => void exportSaved(packageRecord)}

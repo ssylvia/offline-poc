@@ -253,6 +253,13 @@ export async function getFrameById(
 
 export async function deleteFrame(packageId: string, frameId: string): Promise<void> {
   const database = await getDatabase()
+  const frame = await database.get('temporaryFrames', [packageId, frameId])
+  if (frame?.payloadPath) {
+    const packageRecord = await database.get('packages', packageId)
+    if (packageRecord?.payloadStorage?.kind === 'directory') {
+      await deletePackageEntry(packageRecord.payloadStorage, frame.payloadPath)
+    }
+  }
   await database.delete('temporaryFrames', [packageId, frameId])
 }
 

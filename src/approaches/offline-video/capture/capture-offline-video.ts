@@ -1,4 +1,5 @@
 import Viewpoint from '@arcgis/core/Viewpoint.js'
+import Point from '@arcgis/core/geometry/Point.js'
 import type { LiveMapSession } from '../../../shared/arcgis/index.ts'
 import { serializeArcGisJson } from '../../../shared/arcgis/index.ts'
 import { createDirectoryStorageReference } from '../../../shared/storage/directory.ts'
@@ -14,8 +15,10 @@ import {
 } from '../storage/database.ts'
 import {
   VIDEO_CAPTURE_FRAME_RATE,
+  VIDEO_FINAL_VIEW_HOLD_MS,
   VIDEO_PACKAGE_SCHEMA_VERSION,
   type SavedVideoPackage,
+  type PopupAnchor,
   type VideoCaptureOptions,
   type VideoCaptureWarning,
   type VideoDraftView,
@@ -36,7 +39,10 @@ import {
   composeZoomTimelineFrame,
   takeMapOnlyScreenshot,
 } from './view-state.ts'
-import { createZoomTimelinePlan } from './zoom-timelines.ts'
+import {
+  createZoomTimelinePlan,
+  getZoomTimelineCaptureSize,
+} from './zoom-timelines.ts'
 
 const largeWorkingCaptureBytes = 250 * 1024 * 1024
 const videoReadbackErrorMessage = 'The encoded video could not be read back for verification.'
@@ -56,6 +62,11 @@ interface OriginalMapState {
   popup: LiveMapSession['view']['popup']
   popupWasVisible: boolean
   viewpoint: ReturnType<typeof serializeArcGisJson>
+}
+
+interface CapturedTimelineFrames {
+  popupAnchors: Map<string, PopupAnchor>
+  thumbnailBlob: Blob
 }
 
 function asError(error: unknown, fallbackMessage: string): Error {
@@ -276,7 +287,7 @@ async function captureTimelineFrames(options: {
   storage?: Extract<SavedVideoPackage['payloadStorage'], { kind: 'directory' }>
   timeline: ReturnType<typeof createVideoTimeline>
   views: VideoDraftView[]
-}): Promise<Blob> {
+}): Promise<CapturedTimelineFrames> {
   const {
     originalState,
     packageId,
@@ -317,8 +328,10 @@ async function captureTimelineFrames(options: {
     0,
   )
   const totalWork = views.length + timeline.frames.length + zoomCaptureCount
+  const zoomCaptureSize = getZoomTimelineCaptureSize(size)
   let completedWork = 0
   let firstFinalImage: Blob | undefined
+  const popupAnchors = new Map<string, PopupAnchor>()
   let rawFrameIndex = -1
   let captureViewport: Awaited<ReturnType<typeof createVideoCaptureViewport>> | undefined
   const reportFrameProgress = (detail: string) => {
@@ -355,6 +368,23 @@ async function captureTimelineFrames(options: {
       await captureView.goTo(Viewpoint.fromJSON(view.viewpoint), { animate: false })
       const finalImage = await takeMapOnlyScreenshot(captureView, size, signal)
       firstFinalImage ??= finalImage
+      if (view.popup) {
+        try {
+          const screenPoint = captureView.toScreen(Point.fromJSON(view.popup.location))
+          if (
+            screenPoint
+            && Number.isFinite(screenPoint.x)
+            && Number.isFinite(screenPoint.y)
+          ) {
+            popupAnchors.set(view.id, {
+              x: Math.min(1, Math.max(0, screenPoint.x / size.width)),
+              y: Math.min(1, Math.max(0, screenPoint.y / size.height)),
+            })
+          }
+        } catch {
+          popupAnchors.set(view.id, view.popup.anchor)
+        }
+      }
       reportFrameProgress(
         `Captured final view ${viewIndex + 1} of ${views.length} in the ${size.width}×${size.height} viewport`,
       )
@@ -379,6 +409,9 @@ async function captureTimelineFrames(options: {
       }
     }
 
+    if (transitions.some((transition) => transition.plan.outputFrames.length > 0)) {
+      await captureViewport.resize(zoomCaptureSize, signal)
+    }
     for (const [transitionIndex, transition] of transitions.entries()) {
       const transitionLabel = `${transition.source.name} to ${transition.destination.name}`
       for (const [zoomIndex, zoomTimeline] of transition.plan.timelines.entries()) {
@@ -386,7 +419,7 @@ async function captureTimelineFrames(options: {
           signal.throwIfAborted()
           applyLayerStates(session.map, capture.layers)
           await captureView.goTo(Viewpoint.fromJSON(capture.viewpoint), { animate: false })
-          const blob = await takeMapOnlyScreenshot(captureView, size, signal)
+          const blob = await takeMapOnlyScreenshot(captureView, zoomCaptureSize, signal)
           await putFrame(
             {
               blob,
@@ -495,7 +528,10 @@ async function captureTimelineFrames(options: {
   if (!firstFinalImage) {
     throw new Error('The first final-view image is missing.')
   }
-  return firstFinalImage
+  return {
+    popupAnchors,
+    thumbnailBlob: firstFinalImage,
+  }
 }
 
 export async function captureOfflineVideo({
@@ -506,9 +542,14 @@ export async function captureOfflineVideo({
   views,
   warnings = [],
 }: CaptureOfflineVideoInput): Promise<SavedVideoPackage> {
-  const timeline = createVideoTimeline(views)
-  const estimate = estimateVideoCapture(views)
   const size = validateVideoOutputSize(options.outputSize)
+  const timeline = createVideoTimeline(
+    views,
+    VIDEO_CAPTURE_FRAME_RATE,
+    VIDEO_FINAL_VIEW_HOLD_MS,
+    size,
+  )
+  const estimate = estimateVideoCapture(views, VIDEO_CAPTURE_FRAME_RATE, size)
   const payloadStorage = options.destination
     ? createDirectoryStorageReference(
         options.destination,
@@ -560,7 +601,7 @@ export async function captureOfflineVideo({
       await putAsset({ ...asset, packageId }, directoryStorage)
     }
 
-    const finalThumbnail = await captureTimelineFrames({
+    const capturedFrames = await captureTimelineFrames({
       originalState,
       packageId,
       progress: options.onProgress,
@@ -570,6 +611,18 @@ export async function captureOfflineVideo({
       storage: directoryStorage,
       timeline,
       views,
+    })
+    const capturedScenes = timeline.scenes.map((scene) => {
+      const popupAnchor = capturedFrames.popupAnchors.get(scene.id)
+      return popupAnchor && scene.popup
+        ? {
+            ...scene,
+            popup: {
+              ...scene.popup,
+              anchor: popupAnchor,
+            },
+          }
+        : scene
     })
 
     const encoded = await encodeVideoFrames({
@@ -597,17 +650,17 @@ export async function captureOfflineVideo({
     })
     const verifiedVideo = await verifyVideoBlob(
       encoded.blob,
-      timeline.scenes,
+      capturedScenes,
       timeline.durationMs,
       options.signal,
     )
     const assetBytes = assets.reduce((total, asset) => total + asset.blob.size, 0)
     const completed = await finalizePackage({
       ...stagingPackage,
-      byteSize: encoded.blob.size + finalThumbnail.size + assetBytes,
+      byteSize: encoded.blob.size + capturedFrames.thumbnailBlob.size + assetBytes,
       durationMs: verifiedVideo.durationMs,
       scenes: verifiedVideo.scenes,
-      thumbnailBlob: finalThumbnail,
+      thumbnailBlob: capturedFrames.thumbnailBlob,
       videoBlob: directoryStorage ? undefined : encoded.blob,
       videoFilePath: directoryStorage ? encoded.fileName : undefined,
       videoMimeType: encoded.mimeType,

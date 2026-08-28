@@ -3,6 +3,7 @@ import { useObjectUrl } from '../../../shared/use-object-url.ts'
 import type { SavedVideoPackage } from '../types.ts'
 
 interface SavedVideoLibraryProps {
+  disabled?: boolean
   onDelete: (packageRecord: SavedVideoPackage) => void
   onExport: (packageRecord: SavedVideoPackage) => void
   onOpen: (packageRecord: SavedVideoPackage) => void
@@ -11,6 +12,7 @@ interface SavedVideoLibraryProps {
 }
 
 function SavedVideoCard({
+  disabled = false,
   onDelete,
   onExport,
   onOpen,
@@ -83,6 +85,7 @@ function SavedVideoCard({
           <button
             type="button"
             className="button button-small"
+            disabled={disabled}
             aria-label={`Open saved video package ${packageRecord.packageId} for ${packageRecord.item.title}`}
             onClick={() => onOpen(packageRecord)}
           >
@@ -91,6 +94,7 @@ function SavedVideoCard({
           <button
             type="button"
             className="button button-small button-secondary"
+            disabled={disabled}
             aria-label={`Export saved video package ${packageRecord.packageId} for ${packageRecord.item.title}`}
             onClick={() => onExport(packageRecord)}
           >
@@ -99,6 +103,7 @@ function SavedVideoCard({
           <button
             type="button"
             className="button button-small button-secondary"
+            disabled={disabled}
             aria-label={`Recapture ${packageRecord.item.title} from the live WebMap`}
             onClick={() => onRecapture(packageRecord)}
           >
@@ -107,6 +112,7 @@ function SavedVideoCard({
           <button
             type="button"
             className="button button-small button-danger"
+            disabled={disabled}
             aria-label={`Delete saved video package ${packageRecord.packageId} for ${packageRecord.item.title}`}
             onClick={() => onDelete(packageRecord)}
           >
@@ -119,6 +125,7 @@ function SavedVideoCard({
 }
 
 export function SavedVideoLibrary({
+  disabled = false,
   onDelete,
   onExport,
   onOpen,
@@ -138,6 +145,7 @@ export function SavedVideoLibrary({
       ) : packages.map((packageRecord) => (
         <SavedVideoCard
           key={packageRecord.packageId}
+          disabled={disabled}
           onDelete={onDelete}
           onExport={onExport}
           onOpen={onOpen}

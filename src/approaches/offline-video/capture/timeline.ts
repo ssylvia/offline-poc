@@ -4,8 +4,13 @@ import {
   VIDEO_FINAL_VIEW_HOLD_MS,
   type CapturedLayerState,
   type VideoDraftView,
+  type VideoOutputSize,
   type VideoTimelineScene,
 } from '../types.ts'
+import {
+  createZoomTimelinePlan,
+  zoomTimelineConstants,
+} from './zoom-timelines.ts'
 
 const minimumPanSeconds = 1.5
 const maximumPanSeconds = 8
@@ -129,9 +134,10 @@ export interface TransitionFrameCounts {
 }
 
 export function calculateTransitionFrameCounts(
-  source: Pick<VideoDraftView, 'extent' | 'layers' | 'viewpoint'>,
-  destination: Pick<VideoDraftView, 'extent' | 'layers' | 'viewpoint'>,
+  source: Pick<VideoDraftView, 'extent' | 'layers' | 'mapViewportSize' | 'viewpoint'>,
+  destination: Pick<VideoDraftView, 'extent' | 'layers' | 'mapViewportSize' | 'viewpoint'>,
   frameRate = VIDEO_CAPTURE_FRAME_RATE,
+  outputSize?: VideoOutputSize,
 ): TransitionFrameCounts {
   if (!Number.isFinite(frameRate) || frameRate <= 0) {
     throw new Error('Video frame rate must be greater than zero.')
@@ -140,8 +146,18 @@ export function calculateTransitionFrameCounts(
   const destinationCenter = readPoint(destination.viewpoint)
   const sourceExtent = readExtent(source.extent)
   const destinationExtent = readExtent(destination.extent)
+  const sourceViewportWidth = sourceExtent.xmax - sourceExtent.xmin
+  const destinationViewportWidth = destinationExtent.xmax - destinationExtent.xmin
+  const outputViewportWidth = (extentWidth: number, view: typeof source) => (
+    outputSize
+    && view.mapViewportSize
+    && view.mapViewportSize.width > 0
+      ? extentWidth * outputSize.width / view.mapViewportSize.width
+      : extentWidth
+  )
   const averageViewportWidth = (
-    sourceExtent.xmax - sourceExtent.xmin + destinationExtent.xmax - destinationExtent.xmin
+    outputViewportWidth(sourceViewportWidth, source)
+    + outputViewportWidth(destinationViewportWidth, destination)
   ) / 2
   const panInViewportWidths = Math.hypot(
     destinationCenter.x - sourceCenter.x,
@@ -185,11 +201,12 @@ export function calculateTransitionFrameCounts(
 }
 
 export function calculateTransitionDurationMs(
-  source: Pick<VideoDraftView, 'extent' | 'layers' | 'viewpoint'>,
-  destination: Pick<VideoDraftView, 'extent' | 'layers' | 'viewpoint'>,
+  source: Pick<VideoDraftView, 'extent' | 'layers' | 'mapViewportSize' | 'viewpoint'>,
+  destination: Pick<VideoDraftView, 'extent' | 'layers' | 'mapViewportSize' | 'viewpoint'>,
   frameRate = VIDEO_CAPTURE_FRAME_RATE,
+  outputSize?: VideoOutputSize,
 ): number {
-  const frameCounts = calculateTransitionFrameCounts(source, destination, frameRate)
+  const frameCounts = calculateTransitionFrameCounts(source, destination, frameRate, outputSize)
   return frameCounts.transition / frameRate * 1_000
 }
 
@@ -244,6 +261,7 @@ export function createVideoTimeline(
   views: VideoDraftView[],
   frameRate = VIDEO_CAPTURE_FRAME_RATE,
   holdMs = VIDEO_FINAL_VIEW_HOLD_MS,
+  outputSize?: VideoOutputSize,
 ): VideoTimelinePlan {
   if (views.length === 0) {
     throw new Error('Add at least one final view before creating a video.')
@@ -270,6 +288,7 @@ export function createVideoTimeline(
         previousView,
         view,
         frameRate,
+        outputSize,
       )
       for (let index = 0; index < transitionFrames.transition; index += 1) {
         const progress = (index + 1) / transitionFrames.transition
@@ -345,16 +364,46 @@ export function createVideoTimeline(
 export function estimateVideoCapture(
   views: VideoDraftView[],
   frameRate = VIDEO_CAPTURE_FRAME_RATE,
+  outputSize?: VideoOutputSize,
 ): { durationMs: number; frameCount: number; workingBytes: number } | undefined {
   if (views.length === 0) {
     return undefined
   }
-  const timeline = createVideoTimeline(views, frameRate)
-  const firstThumbnail = views[0].thumbnailBlob.size
-  return {
-    durationMs: timeline.durationMs,
-    frameCount: timeline.frames.length,
-    workingBytes: timeline.frames.length * firstThumbnail,
+  try {
+    const timeline = createVideoTimeline(
+      views,
+      frameRate,
+      VIDEO_FINAL_VIEW_HOLD_MS,
+      outputSize,
+    )
+    const firstThumbnail = views[0].thumbnailBlob.size
+    const peakZoomCaptureFrames = views.slice(1).reduce((peak, destination, index) => {
+      const source = views[index]
+      if (!source) {
+        return peak
+      }
+      const transitionFrames = timeline.frames.filter((frame) => (
+        frame.phase === 'transition'
+        && frame.transitionFromSceneId === source.id
+        && frame.transitionToSceneId === destination.id
+      ))
+      const plan = createZoomTimelinePlan(transitionFrames, source, destination)
+      const captureCount = plan.timelines.reduce(
+        (total, zoomTimeline) => total + zoomTimeline.captures.length,
+        0,
+      )
+      return Math.max(peak, captureCount)
+    }, 0)
+    return {
+      durationMs: timeline.durationMs,
+      frameCount: timeline.frames.length,
+      workingBytes: (
+        timeline.frames.length
+        + peakZoomCaptureFrames * Math.pow(zoomTimelineConstants.overscan, 2)
+      ) * firstThumbnail,
+    }
+  } catch {
+    return undefined
   }
 }
 

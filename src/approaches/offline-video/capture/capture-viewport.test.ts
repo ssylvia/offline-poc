@@ -25,18 +25,22 @@ vi.mock('@arcgis/core/core/reactiveUtils.js', () => ({
 vi.mock('@arcgis/core/views/MapView.js', () => ({
   default: class MapViewMock {
     container: HTMLDivElement
-    height: number
     map: unknown
     resizing = false
     updating = false
-    width: number
 
     constructor(properties: Record<string, unknown>) {
       mocks.constructorProperties = properties
       this.container = properties.container as HTMLDivElement
-      this.height = Number.parseInt(this.container.style.height, 10)
       this.map = properties.map
-      this.width = Number.parseInt(this.container.style.width, 10)
+    }
+
+    get height() {
+      return Number.parseInt(this.container.style.height, 10)
+    }
+
+    get width() {
+      return Number.parseInt(this.container.style.width, 10)
     }
 
     destroy() {
@@ -88,6 +92,10 @@ describe('fixed video capture viewport', () => {
       },
     })
     expect(mocks.whenOnce).toHaveBeenCalledOnce()
+
+    await viewport.resize({ height: 1_296, width: 2_304 }, controller.signal)
+    expect(container).toHaveStyle({ height: '1296px', width: '2304px' })
+    expect(mocks.whenOnce).toHaveBeenCalledTimes(2)
 
     viewport.destroy()
     expect(mocks.mapAtDestroy).toBeNull()

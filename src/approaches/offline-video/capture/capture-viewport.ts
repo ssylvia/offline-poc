@@ -7,6 +7,7 @@ import type { VideoOutputSize } from '../types.ts'
 
 export interface VideoCaptureViewport {
   destroy: () => void
+  resize: (size: VideoOutputSize, signal: AbortSignal) => Promise<void>
   view: MapView
 }
 
@@ -29,6 +30,20 @@ function waitForViewReady(view: MapView, signal: AbortSignal): Promise<MapView> 
       },
     )
   })
+}
+
+async function waitForViewportSize(
+  view: MapView,
+  size: VideoOutputSize,
+  signal: AbortSignal,
+): Promise<void> {
+  await whenOnce(() => (
+    view.width === size.width
+    && view.height === size.height
+    && !view.resizing
+    && !view.updating
+  ), { signal })
+  signal.throwIfAborted()
 }
 
 export async function createVideoCaptureViewport(
@@ -71,14 +86,16 @@ export async function createVideoCaptureViewport(
     })
     const captureView = view
     await waitForViewReady(captureView, signal)
-    await whenOnce(() => (
-      captureView.width === size.width
-      && captureView.height === size.height
-      && !captureView.resizing
-      && !captureView.updating
-    ), { signal })
-    signal.throwIfAborted()
-    return { destroy, view: captureView }
+    await waitForViewportSize(captureView, size, signal)
+    return {
+      destroy,
+      resize: async (nextSize, resizeSignal) => {
+        container.style.height = `${nextSize.height}px`
+        container.style.width = `${nextSize.width}px`
+        await waitForViewportSize(captureView, nextSize, resizeSignal)
+      },
+      view: captureView,
+    }
   } catch (error) {
     destroy()
     throw error

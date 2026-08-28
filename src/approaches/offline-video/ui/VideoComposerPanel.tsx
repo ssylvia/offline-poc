@@ -5,10 +5,11 @@ import {
   isVideoOutputSizeValid,
   VIDEO_OUTPUT_SIZE_LIMITS,
 } from '../capture/video-settings.ts'
-import type {
-  VideoCaptureProgress,
-  VideoDraftView,
-  VideoOutputSize,
+import {
+  VIDEO_CAPTURE_FRAME_RATE,
+  type VideoCaptureProgress,
+  type VideoDraftView,
+  type VideoOutputSize,
 } from '../types.ts'
 
 interface VideoComposerPanelProps {
@@ -146,7 +147,7 @@ export function VideoComposerPanel({
   views,
   warningCountByView = {},
 }: VideoComposerPanelProps) {
-  const estimate = estimateVideoCapture(views)
+  const estimate = estimateVideoCapture(views, VIDEO_CAPTURE_FRAME_RATE, outputSize)
   const isLarge = (estimate?.workingBytes ?? 0) >= 250 * 1024 * 1024
   const isBusy = isCapturing || isRecordingView
   const isOutputSizeValid = isVideoOutputSizeValid(outputSize)

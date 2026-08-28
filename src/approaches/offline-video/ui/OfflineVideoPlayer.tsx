@@ -278,6 +278,7 @@ export function OfflineVideoPlayer({
   const videoRef = useRef<HTMLVideoElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
   const [currentTimeMs, setCurrentTimeMs] = useState(0)
+  const [hasEnded, setHasEnded] = useState(false)
   const [isPlaying, setIsPlaying] = useState(false)
   const [navigationTargetIndex, setNavigationTargetIndex] = useState<number>()
   const [contentRect, setContentRect] = useState<MediaContentRect>({
@@ -325,6 +326,7 @@ export function OfflineVideoPlayer({
     video.pause()
     video.currentTime = scene.timestampMs / 1_000
     setCurrentTimeMs(scene.timestampMs)
+    setHasEnded(false)
     setIsPlaying(false)
     setNavigationTargetIndex(undefined)
   }, [])
@@ -340,6 +342,7 @@ export function OfflineVideoPlayer({
     }
 
     const currentScene = activeScene ?? packageRecord.scenes[activeSceneIndex]
+    setHasEnded(false)
     setNavigationTargetIndex(scene.index)
     if (
       currentScene
@@ -370,19 +373,23 @@ export function OfflineVideoPlayer({
     const lastScene = packageRecord.scenes.at(-1)
     const frameDurationMs = 1_000 / Math.max(1, packageRecord.frameRate)
     if (
-      lastScene
-      && video.currentTime * 1_000 >= lastScene.holdEndMs - frameDurationMs
+      hasEnded
+      || (
+        lastScene
+        && video.currentTime * 1_000 >= lastScene.holdEndMs - frameDurationMs
+      )
     ) {
       video.currentTime = 0
       setCurrentTimeMs(0)
     }
+    setHasEnded(false)
     setNavigationTargetIndex(undefined)
     setIsPlaying(true)
     void video.play().catch(() => {
       setIsPlaying(false)
       onError('The saved map tour could not play.')
     })
-  }, [isPlaying, onError, packageRecord.frameRate, packageRecord.scenes])
+  }, [hasEnded, isPlaying, onError, packageRecord.frameRate, packageRecord.scenes])
 
   const handleTimeUpdate = useCallback((video: HTMLVideoElement) => {
     const nextTimeMs = video.currentTime * 1_000
@@ -471,9 +478,13 @@ export function OfflineVideoPlayer({
                 setIsPlaying(false)
               }
             }
+            setHasEnded(true)
           }}
           onPause={() => setIsPlaying(false)}
-          onPlay={() => setIsPlaying(true)}
+          onPlay={() => {
+            setHasEnded(false)
+            setIsPlaying(true)
+          }}
           onSeeked={(event) => setCurrentTimeMs(event.currentTarget.currentTime * 1_000)}
           onTimeUpdate={(event) => handleTimeUpdate(event.currentTarget)}
         >
