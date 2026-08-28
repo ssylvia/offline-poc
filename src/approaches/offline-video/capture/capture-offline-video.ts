@@ -20,11 +20,16 @@ import {
   type VideoPackageAsset,
   type VideoTimelineScene,
 } from '../types.ts'
-import { createVideoTimeline, estimateVideoCapture } from './timeline.ts'
+import {
+  capturedLayerStatesMatch,
+  createVideoTimeline,
+  estimateVideoCapture,
+} from './timeline.ts'
 import { encodeVideoFrames } from './video-encoder.ts'
 import {
   applyLayerStates,
   captureLayerStates,
+  createZoomImageFrame,
   crossFadeImageBlobs,
   getVideoOutputSize,
   takeMapOnlyScreenshot,
@@ -268,6 +273,7 @@ async function captureTimelineFrames(options: {
   storage?: Extract<SavedVideoPackage['payloadStorage'], { kind: 'directory' }>
   thumbnailByScene: Map<string, Blob>
   timeline: ReturnType<typeof createVideoTimeline>
+  viewByScene: Map<string, VideoDraftView>
 }): Promise<void> {
   const {
     originalState,
@@ -279,11 +285,13 @@ async function captureTimelineFrames(options: {
     storage,
     thumbnailByScene,
     timeline,
+    viewByScene,
   } = options
 
   let captureError: unknown
-  let activeCrossFadeDestination: string | undefined
-  let crossFadeSource: Blob | undefined
+  let activeTransitionKey: string | undefined
+  let transitionDestination: Blob | undefined
+  let transitionSource: Blob | undefined
   let lastRenderedBlob: Blob | undefined
   try {
     if (originalState.popup) {
@@ -307,35 +315,83 @@ async function captureTimelineFrames(options: {
         } else {
           blob = savedThumbnail
         }
-        activeCrossFadeDestination = undefined
-        crossFadeSource = undefined
-      } else if (phase === 'zoom-crossfade') {
+        activeTransitionKey = undefined
+        transitionDestination = undefined
+        transitionSource = undefined
+      } else if (phase === 'zoom-animation' || phase === 'layer-crossfade') {
         if (
-          !frame.crossFadeFromSceneId
-          || !frame.crossFadeToSceneId
-          || frame.crossFadeProgress === undefined
+          !frame.transitionFromSceneId
+          || !frame.transitionToSceneId
+          || frame.transitionProgress === undefined
         ) {
-          throw new Error(`Zoom cross-fade frame ${frame.index + 1} is incomplete.`)
+          throw new Error(`Transition frame ${frame.index + 1} is incomplete.`)
         }
-        if (activeCrossFadeDestination !== frame.crossFadeToSceneId) {
-          crossFadeSource = lastRenderedBlob
-            ?? thumbnailByScene.get(frame.crossFadeFromSceneId)
-          activeCrossFadeDestination = frame.crossFadeToSceneId
+        const transitionKey = `${phase}:${frame.transitionToSceneId}`
+        if (activeTransitionKey !== transitionKey) {
+          transitionSource = lastRenderedBlob
+            ?? thumbnailByScene.get(frame.transitionFromSceneId)
+          activeTransitionKey = transitionKey
+          if (phase === 'zoom-animation') {
+            const sourceView = viewByScene.get(frame.transitionFromSceneId)
+            const destinationView = viewByScene.get(frame.transitionToSceneId)
+            if (!sourceView || !destinationView) {
+              throw new Error(
+                `Zoom animation frame ${frame.index + 1} is missing captured view metadata.`,
+              )
+            }
+            const layersChanged = !capturedLayerStatesMatch(
+              sourceView.layers,
+              destinationView.layers,
+            )
+            if (layersChanged) {
+              applyLayerStates(session.map, sourceView.layers)
+              await session.view.goTo(
+                Viewpoint.fromJSON(destinationView.viewpoint),
+                { animate: false },
+              )
+              transitionDestination = await takeMapOnlyScreenshot(
+                session.view,
+                size,
+                signal,
+              )
+            } else {
+              transitionDestination = thumbnailByScene.get(frame.transitionToSceneId)
+            }
+          } else {
+            transitionDestination = thumbnailByScene.get(frame.transitionToSceneId)
+          }
         }
-        const destination = thumbnailByScene.get(frame.crossFadeToSceneId)
-        if (!crossFadeSource || !destination) {
-          throw new Error(`Zoom cross-fade frame ${frame.index + 1} is missing an endpoint image.`)
+        if (!transitionSource || !transitionDestination) {
+          throw new Error(
+            `Transition frame ${frame.index + 1} is missing an endpoint image.`,
+          )
         }
-        blob = await crossFadeImageBlobs(
-          crossFadeSource,
-          destination,
-          size,
-          frame.crossFadeProgress,
-          signal,
-        )
+        if (phase === 'zoom-animation') {
+          if (frame.sourceScale === undefined || frame.destinationScale === undefined) {
+            throw new Error(`Zoom animation frame ${frame.index + 1} is missing map scales.`)
+          }
+          blob = await createZoomImageFrame(
+            transitionSource,
+            transitionDestination,
+            size,
+            frame.transitionProgress,
+            frame.sourceScale,
+            frame.destinationScale,
+            signal,
+          )
+        } else {
+          blob = await crossFadeImageBlobs(
+            transitionSource,
+            transitionDestination,
+            size,
+            frame.transitionProgress,
+            signal,
+          )
+        }
       } else {
-        activeCrossFadeDestination = undefined
-        crossFadeSource = undefined
+        activeTransitionKey = undefined
+        transitionDestination = undefined
+        transitionSource = undefined
         applyLayerStates(session.map, frame.layers)
         await session.view.goTo(Viewpoint.fromJSON(frame.viewpoint), { animate: false })
         blob = await takeMapOnlyScreenshot(session.view, size, signal)
@@ -356,8 +412,10 @@ async function captureTimelineFrames(options: {
         detail: `${
           phase === 'pan'
             ? 'Captured pan'
-            : phase === 'zoom-crossfade'
-              ? 'Generated zoom cross-fade'
+            : phase === 'zoom-animation'
+              ? 'Generated zoom animation'
+              : phase === 'layer-crossfade'
+                ? 'Generated layer cross-fade'
               : 'Staged final-view hold'
         } frame ${(frame.index + 1).toLocaleString()} of ${timeline.frames.length.toLocaleString()}`,
         phase: 'frames',
@@ -464,6 +522,7 @@ export async function captureOfflineVideo({
       storage: directoryStorage,
       thumbnailByScene: new Map(views.map((view) => [view.id, view.thumbnailBlob])),
       timeline,
+      viewByScene: new Map(views.map((view) => [view.id, view])),
     })
 
     const encoded = await encodeVideoFrames({

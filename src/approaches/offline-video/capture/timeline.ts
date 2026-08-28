@@ -13,6 +13,7 @@ const panSecondsPerViewportWidth = 2.25
 const minimumZoomSeconds = 1
 const maximumZoomSeconds = 3
 const zoomSecondsPerStop = 0.65
+const layerCrossFadeSeconds = 1
 const nominalViewportWidthPixels = 960
 const metersPerPixelAtScaleOne = 0.0002645833333333333
 const movementTolerance = 1e-9
@@ -36,14 +37,16 @@ interface ExtentLike {
 }
 
 export interface VideoTimelineFrame {
-  crossFadeFromSceneId?: string
-  crossFadeProgress?: number
-  crossFadeToSceneId?: string
+  destinationScale?: number
   index: number
   layers: CapturedLayerState[]
-  phase: 'hold' | 'pan' | 'zoom-crossfade'
+  phase: 'hold' | 'layer-crossfade' | 'pan' | 'zoom-animation'
+  sourceScale?: number
   sceneId?: string
   timeMs: number
+  transitionFromSceneId?: string
+  transitionProgress?: number
+  transitionToSceneId?: string
   viewpoint: JsonObject
 }
 
@@ -101,7 +104,7 @@ function interpolateRotation(source: number, destination: number, progress: numb
   return (source + delta * progress + 360) % 360
 }
 
-function layersMatch(
+export function capturedLayerStatesMatch(
   source: CapturedLayerState[],
   destination: CapturedLayerState[],
 ): boolean {
@@ -116,8 +119,9 @@ function layersMatch(
 }
 
 export interface TransitionFrameCounts {
+  layerCrossFade: number
   pan: number
-  zoomCrossFade: number
+  zoomAnimation: number
 }
 
 export function calculateTransitionFrameCounts(
@@ -146,8 +150,8 @@ export function calculateTransitionFrameCounts(
   const zoomStops = Math.abs(Math.log2(
     readScale(destination.viewpoint) / readScale(source.viewpoint),
   ))
-  const needsCrossFade = zoomStops > movementTolerance
-    || !layersMatch(source.layers, destination.layers)
+  const needsZoomAnimation = zoomStops > movementTolerance
+  const needsLayerCrossFade = !capturedLayerStatesMatch(source.layers, destination.layers)
 
   const panSeconds = Math.min(
     maximumPanSeconds,
@@ -158,8 +162,11 @@ export function calculateTransitionFrameCounts(
     Math.max(minimumZoomSeconds, minimumZoomSeconds + zoomStops * zoomSecondsPerStop),
   )
   return {
+    layerCrossFade: needsLayerCrossFade
+      ? Math.max(1, Math.round(layerCrossFadeSeconds * frameRate))
+      : 0,
     pan: hasPan ? Math.max(1, Math.round(panSeconds * frameRate)) : 0,
-    zoomCrossFade: needsCrossFade
+    zoomAnimation: needsZoomAnimation
       ? Math.max(1, Math.round(zoomSeconds * frameRate))
       : 0,
   }
@@ -171,7 +178,9 @@ export function calculateTransitionDurationMs(
   frameRate = VIDEO_CAPTURE_FRAME_RATE,
 ): number {
   const frameCounts = calculateTransitionFrameCounts(source, destination, frameRate)
-  return (frameCounts.pan + frameCounts.zoomCrossFade) / frameRate * 1_000
+  return (
+    frameCounts.pan + frameCounts.zoomAnimation + frameCounts.layerCrossFade
+  ) / frameRate * 1_000
 }
 
 export function interpolatePanViewpoint(
@@ -267,16 +276,32 @@ export function createVideoTimeline(
         })
         elapsedMs += frameDurationMs
       }
-      for (let index = 0; index < transitionFrames.zoomCrossFade; index += 1) {
-        const progress = (index + 1) / transitionFrames.zoomCrossFade
+      for (let index = 0; index < transitionFrames.zoomAnimation; index += 1) {
+        const progress = (index + 1) / transitionFrames.zoomAnimation
         frames.push({
-          crossFadeFromSceneId: previousView.id,
-          crossFadeProgress: progress,
-          crossFadeToSceneId: view.id,
+          destinationScale: readScale(view.viewpoint),
+          index: frames.length,
+          layers: cloneLayers(previousView.layers),
+          phase: 'zoom-animation',
+          sourceScale: readScale(previousView.viewpoint),
+          timeMs: elapsedMs,
+          transitionFromSceneId: previousView.id,
+          transitionProgress: easeInOutCubic(progress),
+          transitionToSceneId: view.id,
+          viewpoint: view.viewpoint,
+        })
+        elapsedMs += frameDurationMs
+      }
+      for (let index = 0; index < transitionFrames.layerCrossFade; index += 1) {
+        const progress = (index + 1) / transitionFrames.layerCrossFade
+        frames.push({
           index: frames.length,
           layers: cloneLayers(view.layers),
-          phase: 'zoom-crossfade',
+          phase: 'layer-crossfade',
           timeMs: elapsedMs,
+          transitionFromSceneId: previousView.id,
+          transitionProgress: progress,
+          transitionToSceneId: view.id,
           viewpoint: view.viewpoint,
         })
         elapsedMs += frameDurationMs
@@ -341,6 +366,7 @@ export function estimateVideoCapture(
 export const videoTimingConstants = {
   maximumPanSeconds,
   maximumZoomSeconds,
+  layerCrossFadeSeconds,
   minimumPanSeconds,
   minimumZoomSeconds,
   nominalViewportWidthPixels,

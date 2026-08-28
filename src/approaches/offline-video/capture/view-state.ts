@@ -122,18 +122,15 @@ export async function crossFadeImageBlobs(
     createImageBitmap(source),
     createImageBitmap(destination),
   ])
-  signal?.throwIfAborted()
-  const canvas = document.createElement('canvas')
-  canvas.width = size.width
-  canvas.height = size.height
-  const context = canvas.getContext('2d', { alpha: false })
-  if (!context) {
-    sourceBitmap.close()
-    destinationBitmap.close()
-    throw new Error('The browser could not create a zoom cross-fade canvas.')
-  }
-
   try {
+    signal?.throwIfAborted()
+    const canvas = document.createElement('canvas')
+    canvas.width = size.width
+    canvas.height = size.height
+    const context = canvas.getContext('2d', { alpha: false })
+    if (!context) {
+      throw new Error('The browser could not create a layer cross-fade canvas.')
+    }
     context.globalAlpha = 1
     context.drawImage(sourceBitmap, 0, 0, size.width, size.height)
     context.globalAlpha = progress
@@ -144,12 +141,82 @@ export async function crossFadeImageBlobs(
         if (blob) {
           resolve(blob)
         } else {
-          reject(new Error('The zoom cross-fade frame could not be encoded.'))
+          reject(new Error('The layer cross-fade frame could not be encoded.'))
         }
       }, 'image/png')
     })
   } finally {
     sourceBitmap.close()
     destinationBitmap.close()
+  }
+}
+
+export async function createZoomImageFrame(
+  source: Blob,
+  destination: Blob,
+  size: VideoOutputSize,
+  progress: number,
+  sourceScale: number,
+  destinationScale: number,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  if (!Number.isFinite(progress) || progress < 0 || progress > 1) {
+    throw new Error('Zoom animation progress must be between zero and one.')
+  }
+  if (
+    !Number.isFinite(sourceScale)
+    || sourceScale <= 0
+    || !Number.isFinite(destinationScale)
+    || destinationScale <= 0
+    || sourceScale === destinationScale
+  ) {
+    throw new Error('Zoom animation requires two different positive map scales.')
+  }
+  signal?.throwIfAborted()
+  if (progress === 0) {
+    return source
+  }
+  if (progress === 1) {
+    return destination
+  }
+
+  const zoomingIn = destinationScale < sourceScale
+  const maximumImageScale = zoomingIn
+    ? sourceScale / destinationScale
+    : destinationScale / sourceScale
+  const imageScale = zoomingIn
+    ? Math.pow(maximumImageScale, progress)
+    : Math.pow(maximumImageScale, 1 - progress)
+  const image = await createImageBitmap(zoomingIn ? source : destination)
+  try {
+    signal?.throwIfAborted()
+    const canvas = document.createElement('canvas')
+    canvas.width = size.width
+    canvas.height = size.height
+    const context = canvas.getContext('2d', { alpha: false })
+    if (!context) {
+      throw new Error('The browser could not create a zoom animation canvas.')
+    }
+    const width = size.width * imageScale
+    const height = size.height * imageScale
+    context.drawImage(
+      image,
+      (size.width - width) / 2,
+      (size.height - height) / 2,
+      width,
+      height,
+    )
+    signal?.throwIfAborted()
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve(blob)
+        } else {
+          reject(new Error('The zoom animation frame could not be encoded.'))
+        }
+      }, 'image/png')
+    })
+  } finally {
+    image.close()
   }
 }

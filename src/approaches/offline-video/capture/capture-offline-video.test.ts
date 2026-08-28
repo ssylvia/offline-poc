@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
+  capturedLayerStatesMatch: vi.fn(),
   createVideoTimeline: vi.fn(),
+  createZoomImageFrame: vi.fn(),
   crossFadeImageBlobs: vi.fn(),
   deletePackage: vi.fn(),
   encodeVideoFrames: vi.fn(),
@@ -31,6 +33,7 @@ vi.mock('../storage/database.ts', () => ({
 }))
 
 vi.mock('./timeline.ts', () => ({
+  capturedLayerStatesMatch: mocks.capturedLayerStatesMatch,
   createVideoTimeline: mocks.createVideoTimeline,
   estimateVideoCapture: vi.fn(() => ({
     durationMs: 3_000,
@@ -47,6 +50,7 @@ vi.mock('./view-state.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./view-state.ts')>()
   return {
     ...actual,
+    createZoomImageFrame: mocks.createZoomImageFrame,
     crossFadeImageBlobs: mocks.crossFadeImageBlobs,
     getVideoOutputSize: mocks.getVideoOutputSize,
     takeMapOnlyScreenshot: mocks.takeMapOnlyScreenshot,
@@ -88,19 +92,34 @@ function createTimelinePlan() {
       },
       {
         index: 2,
-        crossFadeFromSceneId: 'scene-1',
-        crossFadeProgress: 0.5,
-        crossFadeToSceneId: 'scene-2',
+        destinationScale: 2_000,
         layers: [
           { id: 'roads', opacity: 0.5, title: 'Roads', visible: false },
           { id: 'labels', opacity: 1, title: 'Labels', visible: true },
         ],
-        phase: 'zoom-crossfade',
+        phase: 'zoom-animation',
+        sourceScale: 1_000,
         timeMs: 1_500,
+        transitionFromSceneId: 'scene-1',
+        transitionProgress: 0.5,
+        transitionToSceneId: 'scene-2',
         viewpoint: { id: 'scene-2' },
       },
       {
         index: 3,
+        layers: [
+          { id: 'roads', opacity: 0.5, title: 'Roads', visible: false },
+          { id: 'labels', opacity: 1, title: 'Labels', visible: true },
+        ],
+        phase: 'layer-crossfade',
+        timeMs: 1_750,
+        transitionFromSceneId: 'scene-1',
+        transitionProgress: 0.5,
+        transitionToSceneId: 'scene-2',
+        viewpoint: { id: 'scene-2' },
+      },
+      {
+        index: 4,
         layers: [
           { id: 'roads', opacity: 0.5, title: 'Roads', visible: false },
           { id: 'labels', opacity: 1, title: 'Labels', visible: true },
@@ -249,10 +268,12 @@ describe('captureOfflineVideo', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     frameStore.clear()
+    mocks.capturedLayerStatesMatch.mockReturnValue(false)
     mocks.createVideoTimeline.mockReturnValue(createTimelinePlan())
-    mocks.crossFadeImageBlobs.mockResolvedValue(
-      new Blob(['cross-fade'], { type: 'image/png' }),
-    )
+    mocks.crossFadeImageBlobs.mockReset()
+      .mockResolvedValueOnce(new Blob(['layer-cross-fade'], { type: 'image/png' }))
+    mocks.createZoomImageFrame.mockReset()
+      .mockResolvedValueOnce(new Blob(['zoom-animation'], { type: 'image/png' }))
     mocks.deletePackage.mockResolvedValue(undefined)
     mocks.finalizePackage.mockImplementation(async (packageRecord) => ({
       ...packageRecord,
@@ -291,7 +312,7 @@ describe('captureOfflineVideo', () => {
     const session = createSession()
     const { seekedTimesMs } = installVerifiedVideo(2.4)
     mocks.encodeVideoFrames.mockImplementation(async ({ frameCount, getFrame }) => {
-      expect(frameCount).toBe(4)
+      expect(frameCount).toBe(5)
       expect(session.view.popup.visible).toBe(true)
       expect(session.map.allLayers.toArray()).toMatchObject([
         { id: 'roads', opacity: 0.2, visible: false },
@@ -303,7 +324,14 @@ describe('captureOfflineVideo', () => {
         getFrame(1).then((blob: Blob) => blob.text()),
         getFrame(2).then((blob: Blob) => blob.text()),
         getFrame(3).then((blob: Blob) => blob.text()),
-      ])).toEqual(['thumbnail', 'capture-1', 'cross-fade', 'thumbnail'])
+        getFrame(4).then((blob: Blob) => blob.text()),
+      ])).toEqual([
+        'thumbnail',
+        'capture-1',
+        'zoom-animation',
+        'layer-cross-fade',
+        'thumbnail',
+      ])
       return {
         blob: new Blob(['video'], { type: 'video/webm' }),
         mimeType: 'video/webm',
@@ -328,7 +356,10 @@ describe('captureOfflineVideo', () => {
         capturedAt: 1,
         extent: { xmin: 0, ymin: 0, xmax: 1, ymax: 1 },
         id: 'scene-1',
-        layers: [],
+        layers: [
+          { id: 'roads', opacity: 1, title: 'Roads', visible: true },
+          { id: 'labels', opacity: 0.25, title: 'Labels', visible: false },
+        ],
         name: 'View 1',
         thumbnailBlob: new Blob(['thumbnail']),
         viewpoint: { id: 'view-1' },
@@ -336,7 +367,10 @@ describe('captureOfflineVideo', () => {
         capturedAt: 2,
         extent: { xmin: 1, ymin: 1, xmax: 2, ymax: 2 },
         id: 'scene-2',
-        layers: [],
+        layers: [
+          { id: 'roads', opacity: 0.5, title: 'Roads', visible: false },
+          { id: 'labels', opacity: 1, title: 'Labels', visible: true },
+        ],
         name: 'View 2',
         thumbnailBlob: new Blob(['thumbnail']),
         viewpoint: { id: 'view-2' },
@@ -347,9 +381,19 @@ describe('captureOfflineVideo', () => {
       'scene-1',
       undefined,
       undefined,
+      undefined,
       'scene-2',
     ])
-    expect(mocks.takeMapOnlyScreenshot).toHaveBeenCalledOnce()
+    expect(mocks.takeMapOnlyScreenshot).toHaveBeenCalledTimes(2)
+    expect(mocks.createZoomImageFrame).toHaveBeenCalledWith(
+      expect.any(Blob),
+      expect.any(Blob),
+      { height: 720, width: 1_280 },
+      0.5,
+      1_000,
+      2_000,
+      expect.any(AbortSignal),
+    )
     expect(mocks.crossFadeImageBlobs).toHaveBeenCalledWith(
       expect.any(Blob),
       expect.any(Blob),
@@ -357,6 +401,12 @@ describe('captureOfflineVideo', () => {
       0.5,
       expect.any(AbortSignal),
     )
+    expect(await mocks.createZoomImageFrame.mock.calls[0][1].text()).toBe('capture-2')
+    expect(await mocks.crossFadeImageBlobs.mock.calls[0][0].text()).toBe(
+      'zoom-animation',
+    )
+    expect(mocks.crossFadeImageBlobs).toHaveBeenCalledTimes(1)
+    expect(mocks.createZoomImageFrame).toHaveBeenCalledTimes(1)
     const finalizedPackage = mocks.finalizePackage.mock.calls[0]?.[0]
     expect(finalizedPackage?.durationMs).toBe(2_400)
     expect(finalizedPackage?.scenes).toMatchObject([

@@ -57,11 +57,12 @@ describe('offline video timeline', () => {
     const counts = calculateTransitionFrameCounts(source, oneViewportPan)
 
     expect(counts).toEqual({
+      layerCrossFade: 0,
       pan: Math.round(
         (videoTimingConstants.minimumPanSeconds + videoTimingConstants.panSecondsPerViewportWidth)
         * VIDEO_CAPTURE_FRAME_RATE,
       ),
-      zoomCrossFade: 0,
+      zoomAnimation: 0,
     })
     expect(calculateTransitionDurationMs(source, oneViewportPan)).toBe(
       counts.pan / VIDEO_CAPTURE_FRAME_RATE * 1_000,
@@ -74,9 +75,10 @@ describe('offline video timeline', () => {
     expect(panAndZoom.pan).toBe(
       videoTimingConstants.maximumPanSeconds * VIDEO_CAPTURE_FRAME_RATE,
     )
-    expect(panAndZoom.zoomCrossFade).toBe(
+    expect(panAndZoom.zoomAnimation).toBe(
       videoTimingConstants.maximumZoomSeconds * VIDEO_CAPTURE_FRAME_RATE,
     )
+    expect(panAndZoom.layerCrossFade).toBe(0)
   })
 
   it('ease-in-out interpolates pan and rotation while preserving source zoom', () => {
@@ -89,7 +91,7 @@ describe('offline video timeline', () => {
     expect(midpoint.targetGeometry).toMatchObject({ x: 50, y: 0 })
   })
 
-  it('creates pan frames before zoom cross-fades and longer final-view holds', () => {
+  it('creates pan, zoom, and layer cross-fades in separate ordered phases', () => {
     const timeline = createVideoTimeline([
       makeView('first', 0, 1_000),
       makeView('second', 200, 2_000),
@@ -106,22 +108,31 @@ describe('offline video timeline', () => {
 
     const transitionFrames = timeline.frames.filter((frame) => frame.sceneId === undefined)
     const firstZoomFrameIndex = transitionFrames.findIndex(
-      (frame) => frame.phase === 'zoom-crossfade',
+      (frame) => frame.phase === 'zoom-animation',
+    )
+    const firstLayerFrameIndex = transitionFrames.findIndex(
+      (frame) => frame.phase === 'layer-crossfade',
     )
     expect(firstZoomFrameIndex).toBeGreaterThan(0)
+    expect(firstLayerFrameIndex).toBeGreaterThan(firstZoomFrameIndex)
     expect(
       transitionFrames.slice(0, firstZoomFrameIndex).every((frame) => frame.phase === 'pan'),
     ).toBe(true)
     expect(
-      transitionFrames.slice(firstZoomFrameIndex).every(
-        (frame) => frame.phase === 'zoom-crossfade',
+      transitionFrames.slice(firstZoomFrameIndex, firstLayerFrameIndex).every(
+        (frame) => frame.phase === 'zoom-animation',
       ),
     ).toBe(true)
-    expect(transitionFrames[firstZoomFrameIndex].crossFadeProgress).toBeGreaterThan(0)
-    expect(transitionFrames.at(-1)?.crossFadeProgress).toBe(1)
+    expect(
+      transitionFrames.slice(firstLayerFrameIndex).every(
+        (frame) => frame.phase === 'layer-crossfade',
+      ),
+    ).toBe(true)
+    expect(transitionFrames[firstZoomFrameIndex].transitionProgress).toBeGreaterThan(0)
+    expect(transitionFrames.at(-1)?.transitionProgress).toBe(1)
   })
 
-  it('keeps source layers during pan and switches them for the zoom cross-fade', () => {
+  it('keeps source layers through pan and zoom before the layer cross-fade', () => {
     const timeline = createVideoTimeline([
       makeView('first', 0, 1_000),
       makeView('second', 200, 2_000),
@@ -130,10 +141,28 @@ describe('offline video timeline', () => {
     const transitionFrames = timeline.frames.filter((frame) => frame.sceneId === undefined)
     expect(transitionFrames.length).toBeGreaterThan(1)
     const panFrames = transitionFrames.filter((frame) => frame.phase === 'pan')
-    const zoomFrames = transitionFrames.filter((frame) => frame.phase === 'zoom-crossfade')
+    const zoomFrames = transitionFrames.filter((frame) => frame.phase === 'zoom-animation')
+    const layerFrames = transitionFrames.filter((frame) => frame.phase === 'layer-crossfade')
     expect(panFrames.every((frame) => frame.layers[0]?.visible)).toBe(true)
-    expect(zoomFrames.every((frame) => !frame.layers[0]?.visible)).toBe(true)
+    expect(zoomFrames.every((frame) => frame.layers[0]?.visible)).toBe(true)
+    expect(layerFrames.every((frame) => !frame.layers[0]?.visible)).toBe(true)
     expect(timeline.frames.at(-1)?.sceneId).toBe('second')
+  })
+
+  it('uses a standalone one-second cross-fade for layer-only changes', () => {
+    const source = makeView('first', 0, 1_000)
+    const destination = makeView('second', 0, 1_000)
+    destination.viewpoint.rotation = source.viewpoint.rotation
+
+    expect(calculateTransitionFrameCounts(source, destination)).toEqual({
+      layerCrossFade: videoTimingConstants.layerCrossFadeSeconds * VIDEO_CAPTURE_FRAME_RATE,
+      pan: 0,
+      zoomAnimation: 0,
+    })
+    const transitionFrames = createVideoTimeline([source, destination]).frames.filter(
+      (frame) => frame.sceneId === undefined,
+    )
+    expect(transitionFrames.every((frame) => frame.phase === 'layer-crossfade')).toBe(true)
   })
 
   it('requires valid views and interpolation progress', () => {

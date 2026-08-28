@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   applyLayerStates,
+  createZoomImageFrame,
   crossFadeImageBlobs,
   dataUrlToBlob,
 } from './view-state.ts'
@@ -63,6 +64,90 @@ describe('offline video view state', () => {
     expect(drawImage).toHaveBeenCalledTimes(2)
     expect(await result.text()).toBe('cross-fade')
     expect(bitmaps.every((bitmap) => bitmap.close.mock.calls.length === 1)).toBe(true)
+  })
+
+  it('expands a source image when zooming in', async () => {
+    const drawImage = vi.fn()
+    const canvas = {
+      getContext: vi.fn(() => ({ drawImage })),
+      height: 0,
+      toBlob: vi.fn((callback: BlobCallback) => {
+        callback(new Blob(['zoom-in'], { type: 'image/png' }))
+      }),
+      width: 0,
+    }
+    const bitmap = { close: vi.fn() }
+    const createImageBitmapMock = vi.fn().mockResolvedValue(bitmap)
+    vi.stubGlobal('createImageBitmap', createImageBitmapMock)
+    vi.spyOn(document, 'createElement').mockReturnValue(canvas as never)
+    const source = new Blob(['source'])
+    const destination = new Blob(['destination'])
+
+    await createZoomImageFrame(
+      source,
+      destination,
+      { height: 600, width: 800 },
+      0.5,
+      4_000,
+      1_000,
+    )
+
+    expect(createImageBitmapMock).toHaveBeenCalledWith(source)
+    expect(drawImage).toHaveBeenCalledWith(bitmap, -400, -300, 1_600, 1_200)
+    expect(bitmap.close).toHaveBeenCalledOnce()
+  })
+
+  it('contracts an expanded destination buffer when zooming out', async () => {
+    const drawImage = vi.fn()
+    const canvas = {
+      getContext: vi.fn(() => ({ drawImage })),
+      height: 0,
+      toBlob: vi.fn((callback: BlobCallback) => {
+        callback(new Blob(['zoom-out'], { type: 'image/png' }))
+      }),
+      width: 0,
+    }
+    const bitmap = { close: vi.fn() }
+    const createImageBitmapMock = vi.fn().mockResolvedValue(bitmap)
+    vi.stubGlobal('createImageBitmap', createImageBitmapMock)
+    vi.spyOn(document, 'createElement').mockReturnValue(canvas as never)
+    const source = new Blob(['source'])
+    const destinationBuffer = new Blob(['destination-buffer'])
+
+    await createZoomImageFrame(
+      source,
+      destinationBuffer,
+      { height: 600, width: 800 },
+      0.5,
+      1_000,
+      4_000,
+    )
+
+    expect(createImageBitmapMock).toHaveBeenCalledWith(destinationBuffer)
+    expect(drawImage).toHaveBeenCalledWith(bitmap, -400, -300, 1_600, 1_200)
+    expect(bitmap.close).toHaveBeenCalledOnce()
+  })
+
+  it('closes a decoded zoom bitmap when capture is cancelled', async () => {
+    const controller = new AbortController()
+    const reason = new DOMException('Capture cancelled', 'AbortError')
+    const bitmap = { close: vi.fn() }
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => {
+      controller.abort(reason)
+      return bitmap
+    }))
+
+    await expect(createZoomImageFrame(
+      new Blob(['source']),
+      new Blob(['destination']),
+      { height: 600, width: 800 },
+      0.5,
+      4_000,
+      1_000,
+      controller.signal,
+    )).rejects.toBe(reason)
+
+    expect(bitmap.close).toHaveBeenCalledOnce()
   })
 
   it('validates every captured layer before mutating the map', () => {
