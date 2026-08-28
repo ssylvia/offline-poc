@@ -1,37 +1,48 @@
 import Viewpoint from '@arcgis/core/Viewpoint.js'
+import Point from '@arcgis/core/geometry/Point.js'
 import type { LiveMapSession } from '../../../shared/arcgis/index.ts'
 import { serializeArcGisJson } from '../../../shared/arcgis/index.ts'
 import { createDirectoryStorageReference } from '../../../shared/storage/directory.ts'
 import {
+  deleteFrame,
   deletePackage,
   finalizePackage,
   getFrame,
+  getFrameById,
   putAsset,
   putFrame,
   putPackage,
 } from '../storage/database.ts'
 import {
   VIDEO_CAPTURE_FRAME_RATE,
+  VIDEO_FINAL_VIEW_HOLD_MS,
   VIDEO_PACKAGE_SCHEMA_VERSION,
   type SavedVideoPackage,
+  type PopupAnchor,
   type VideoCaptureOptions,
   type VideoCaptureWarning,
   type VideoDraftView,
+  type VideoOutputSize,
   type VideoPackageAsset,
   type VideoTimelineScene,
 } from '../types.ts'
+import { createVideoCaptureViewport } from './capture-viewport.ts'
 import {
   createVideoTimeline,
   estimateVideoCapture,
 } from './timeline.ts'
 import { encodeVideoFrames } from './video-encoder.ts'
+import { validateVideoOutputSize } from './video-settings.ts'
 import {
   applyLayerStates,
   captureLayerStates,
-  createTransitionImageFrame,
-  getVideoOutputSize,
+  composeZoomTimelineFrame,
   takeMapOnlyScreenshot,
 } from './view-state.ts'
+import {
+  createZoomTimelinePlan,
+  getZoomTimelineCaptureSize,
+} from './zoom-timelines.ts'
 
 const largeWorkingCaptureBytes = 250 * 1024 * 1024
 const videoReadbackErrorMessage = 'The encoded video could not be read back for verification.'
@@ -51,6 +62,11 @@ interface OriginalMapState {
   popup: LiveMapSession['view']['popup']
   popupWasVisible: boolean
   viewpoint: ReturnType<typeof serializeArcGisJson>
+}
+
+interface CapturedTimelineFrames {
+  popupAnchors: Map<string, PopupAnchor>
+  thumbnailBlob: Blob
 }
 
 function asError(error: unknown, fallbackMessage: string): Error {
@@ -267,12 +283,11 @@ async function captureTimelineFrames(options: {
   progress: VideoCaptureOptions['onProgress']
   session: LiveMapSession
   signal: AbortSignal
-  size: ReturnType<typeof getVideoOutputSize>
+  size: VideoOutputSize
   storage?: Extract<SavedVideoPackage['payloadStorage'], { kind: 'directory' }>
-  thumbnailByScene: Map<string, Blob>
   timeline: ReturnType<typeof createVideoTimeline>
-  viewByScene: Map<string, VideoDraftView>
-}): Promise<void> {
+  views: VideoDraftView[]
+}): Promise<CapturedTimelineFrames> {
   const {
     originalState,
     packageId,
@@ -281,131 +296,241 @@ async function captureTimelineFrames(options: {
     signal,
     size,
     storage,
-    thumbnailByScene,
     timeline,
-    viewByScene,
+    views,
   } = options
+
+  const transitions = views.slice(1).map((destination, index) => {
+    const source = views[index]
+    if (!source) {
+      throw new Error('A video transition is missing its source view.')
+    }
+    const frames = timeline.frames.filter((frame) => (
+      frame.phase === 'transition'
+      && frame.transitionFromSceneId === source.id
+      && frame.transitionToSceneId === destination.id
+    ))
+    return {
+      destination,
+      plan: createZoomTimelinePlan(frames, source, destination),
+      source,
+    }
+  })
+  const holdFramesByScene = new Map(views.map((view) => [
+    view.id,
+    timeline.frames.filter((frame) => frame.phase === 'hold' && frame.sceneId === view.id),
+  ]))
+  const zoomCaptureCount = transitions.reduce(
+    (total, transition) => total + transition.plan.timelines.reduce(
+      (timelineTotal, zoomTimeline) => timelineTotal + zoomTimeline.captures.length,
+      0,
+    ),
+    0,
+  )
+  const totalWork = views.length + timeline.frames.length + zoomCaptureCount
+  const zoomCaptureSize = getZoomTimelineCaptureSize(size)
+  let completedWork = 0
+  let firstFinalImage: Blob | undefined
+  const popupAnchors = new Map<string, PopupAnchor>()
+  let rawFrameIndex = -1
+  let captureViewport: Awaited<ReturnType<typeof createVideoCaptureViewport>> | undefined
+  const reportFrameProgress = (detail: string) => {
+    completedWork += 1
+    progress({
+      completed: completedWork,
+      detail,
+      phase: 'frames',
+      total: totalWork,
+    })
+  }
+  const rawFrameId = (
+    sourceId: string,
+    destinationId: string,
+    captureId: string,
+  ) => `${packageId}:transition:${sourceId}:${destinationId}:${captureId}`
 
   let captureError: unknown
   try {
     if (originalState.popup) {
       originalState.popup.visible = false
     }
-    for (const frame of timeline.frames) {
+    captureViewport = await createVideoCaptureViewport(
+      session.map,
+      views[0]?.viewpoint ?? {},
+      size,
+      signal,
+    )
+    const captureView = captureViewport.view
+
+    for (const [viewIndex, view] of views.entries()) {
       signal.throwIfAborted()
-      const phase = frame.phase
-      let blob: Blob
-      if (phase === 'hold') {
-        const savedThumbnail = frame.sceneId
-          ? thumbnailByScene.get(frame.sceneId)
-          : undefined
-        if (!savedThumbnail) {
-          if (frame.phase) {
-            throw new Error(`The final image for video frame ${frame.index + 1} is missing.`)
+      applyLayerStates(session.map, view.layers)
+      await captureView.goTo(Viewpoint.fromJSON(view.viewpoint), { animate: false })
+      const finalImage = await takeMapOnlyScreenshot(captureView, size, signal)
+      firstFinalImage ??= finalImage
+      if (view.popup) {
+        try {
+          const screenPoint = captureView.toScreen(Point.fromJSON(view.popup.location))
+          if (
+            screenPoint
+            && Number.isFinite(screenPoint.x)
+            && Number.isFinite(screenPoint.y)
+          ) {
+            popupAnchors.set(view.id, {
+              x: Math.min(1, Math.max(0, screenPoint.x / size.width)),
+              y: Math.min(1, Math.max(0, screenPoint.y / size.height)),
+            })
           }
-          applyLayerStates(session.map, frame.layers)
-          await session.view.goTo(Viewpoint.fromJSON(frame.viewpoint), { animate: false })
-          blob = await takeMapOnlyScreenshot(session.view, size, signal)
-        } else {
-          blob = savedThumbnail
+        } catch {
+          popupAnchors.set(view.id, view.popup.anchor)
         }
-      } else if (phase === 'transition') {
-        if (
-          !frame.transitionFromSceneId
-          || !frame.transitionToSceneId
-          || frame.transitionProgress === undefined
-        ) {
-          throw new Error(`Transition frame ${frame.index + 1} is incomplete.`)
-        }
-        const sourceView = viewByScene.get(frame.transitionFromSceneId)
-        const destinationView = viewByScene.get(frame.transitionToSceneId)
-        if (!sourceView || !destinationView) {
-          throw new Error(
-            `Transition frame ${frame.index + 1} is missing captured view metadata.`,
+      }
+      reportFrameProgress(
+        `Captured final view ${viewIndex + 1} of ${views.length} in the ${size.width}×${size.height} viewport`,
+      )
+      const holdFrames = holdFramesByScene.get(view.id)
+      if (!holdFrames || holdFrames.length === 0) {
+        throw new Error(`The final hold for “${view.name}” is missing.`)
+      }
+      for (const frame of holdFrames) {
+        await putFrame(
+          {
+            blob: finalImage,
+            frameId: `${packageId}:${frame.index}`,
+            index: frame.index,
+            packageId,
+            sceneId: frame.sceneId,
+          },
+          storage,
+        )
+        reportFrameProgress(
+          `Staged final-view hold frame ${(frame.index + 1).toLocaleString()} of ${timeline.frames.length.toLocaleString()}`,
+        )
+      }
+    }
+
+    if (transitions.some((transition) => transition.plan.outputFrames.length > 0)) {
+      await captureViewport.resize(zoomCaptureSize, signal)
+    }
+    for (const [transitionIndex, transition] of transitions.entries()) {
+      const transitionLabel = `${transition.source.name} to ${transition.destination.name}`
+      for (const [zoomIndex, zoomTimeline] of transition.plan.timelines.entries()) {
+        for (const [captureIndex, capture] of zoomTimeline.captures.entries()) {
+          signal.throwIfAborted()
+          applyLayerStates(session.map, capture.layers)
+          await captureView.goTo(Viewpoint.fromJSON(capture.viewpoint), { animate: false })
+          const blob = await takeMapOnlyScreenshot(captureView, zoomCaptureSize, signal)
+          await putFrame(
+            {
+              blob,
+              frameId: rawFrameId(
+                transition.source.id,
+                transition.destination.id,
+                capture.captureId,
+              ),
+              index: rawFrameIndex,
+              packageId,
+            },
+            storage,
+          )
+          rawFrameIndex -= 1
+          reportFrameProgress(
+            `Captured zoom timeline ${zoomIndex + 1} of ${transition.plan.timelines.length} for ${transitionLabel}, frame ${captureIndex + 1} of ${zoomTimeline.captures.length}`,
           )
         }
-        applyLayerStates(session.map, sourceView.layers)
-        await session.view.goTo(Viewpoint.fromJSON(frame.viewpoint), { animate: false })
-        const sourceImage = await takeMapOnlyScreenshot(session.view, size, signal)
-        const needsDestinationImage = frame.layerProgress !== undefined
-          || frame.zoomProgress !== undefined
-        let destinationImage = thumbnailByScene.get(frame.transitionToSceneId)
-        if (needsDestinationImage) {
-          applyLayerStates(session.map, destinationView.layers)
-          await session.view.goTo(
-            Viewpoint.fromJSON(
-              frame.zoomProgress === undefined
-                ? frame.viewpoint
-                : destinationView.viewpoint,
-            ),
-            { animate: false },
+      }
+
+      for (const outputFrame of transition.plan.outputFrames) {
+        signal.throwIfAborted()
+        const images = await Promise.all(outputFrame.contributions.map(async (contribution) => {
+          const frameId = rawFrameId(
+            transition.source.id,
+            transition.destination.id,
+            contribution.captureId,
           )
-          destinationImage = await takeMapOnlyScreenshot(session.view, size, signal)
-        }
-        if (!destinationImage) {
-          throw new Error(`Transition frame ${frame.index + 1} is missing its destination image.`)
-        }
-        blob = await createTransitionImageFrame(
-          sourceImage,
-          destinationImage,
+          const capturedFrame = await getFrameById(packageId, frameId)
+          if (!capturedFrame) {
+            throw new Error(
+              `Zoom timeline image for video frame ${outputFrame.index + 1} is missing.`,
+            )
+          }
+          return {
+            blob: capturedFrame.blob,
+            imageScale: contribution.imageScale,
+            opacity: contribution.opacity,
+          }
+        }))
+        const blob = await composeZoomTimelineFrame(
+          images,
           size,
-          frame.transitionProgress,
-          frame.sourceScale,
-          frame.destinationScale,
-          frame.layerProgress,
           signal,
         )
-      } else {
-        applyLayerStates(session.map, frame.layers)
-        await session.view.goTo(Viewpoint.fromJSON(frame.viewpoint), { animate: false })
-        blob = await takeMapOnlyScreenshot(session.view, size, signal)
-      }
-      await putFrame(
-        {
-          blob,
-          frameId: `${packageId}:${frame.index}`,
-          index: frame.index,
+        await putFrame(
+          {
+            blob,
+            frameId: `${packageId}:${outputFrame.index}`,
+            index: outputFrame.index,
+            packageId,
+          },
+          storage,
+        )
+        await Promise.all(outputFrame.contributions.map((contribution) => deleteFrame(
           packageId,
-          sceneId: frame.sceneId,
-        },
-        storage,
-      )
-      progress({
-        completed: frame.index + 1,
-        detail: `${
-          phase === 'transition'
-              ? 'Generated synchronized transition'
-              : 'Staged final-view hold'
-        } frame ${(frame.index + 1).toLocaleString()} of ${timeline.frames.length.toLocaleString()}`,
-        phase: 'frames',
-        total: timeline.frames.length,
-      })
+          rawFrameId(
+            transition.source.id,
+            transition.destination.id,
+            contribution.captureId,
+          ),
+        )))
+        reportFrameProgress(
+          `Cross-faded transition ${transitionIndex + 1} of ${transitions.length}, frame ${(outputFrame.index + 1).toLocaleString()} of ${timeline.frames.length.toLocaleString()}`,
+        )
+      }
     }
   } catch (error) {
     captureError = error
   }
 
-  let restoreError: unknown
+  const cleanupErrors: Error[] = []
+  if (captureViewport) {
+    try {
+      captureViewport.destroy()
+    } catch (error) {
+      cleanupErrors.push(createCleanupError('Could not destroy the video capture viewport', error))
+    }
+  }
   try {
     await restoreOriginalMapState(session, originalState)
   } catch (error) {
-    restoreError = error
+    cleanupErrors.push(
+      asError(error, 'Offline video capture could not restore the live map state.'),
+    )
   }
-  if (captureError && restoreError) {
+  if (captureError && cleanupErrors.length > 0) {
     throw createAggregateError(
       'Offline video frame capture failed and the live map state could not be restored.',
       [
         asError(captureError, 'Offline video frame capture failed.'),
-        asError(restoreError, 'Offline video capture could not restore the live map state.'),
+        ...cleanupErrors,
       ],
     )
   }
-  if (restoreError) {
-    throw asError(restoreError, 'Offline video capture could not restore the live map state.')
+  if (cleanupErrors.length > 0) {
+    throw createAggregateError(
+      'Offline video capture could not clean up the live map state.',
+      cleanupErrors,
+    )
   }
 
   if (captureError) {
     throw captureError
+  }
+  if (!firstFinalImage) {
+    throw new Error('The first final-view image is missing.')
+  }
+  return {
+    popupAnchors,
+    thumbnailBlob: firstFinalImage,
   }
 }
 
@@ -417,9 +542,14 @@ export async function captureOfflineVideo({
   views,
   warnings = [],
 }: CaptureOfflineVideoInput): Promise<SavedVideoPackage> {
-  const timeline = createVideoTimeline(views)
-  const estimate = estimateVideoCapture(views)
-  const size = getVideoOutputSize(session.view)
+  const size = validateVideoOutputSize(options.outputSize)
+  const timeline = createVideoTimeline(
+    views,
+    VIDEO_CAPTURE_FRAME_RATE,
+    VIDEO_FINAL_VIEW_HOLD_MS,
+    size,
+  )
+  const estimate = estimateVideoCapture(views, VIDEO_CAPTURE_FRAME_RATE, size)
   const payloadStorage = options.destination
     ? createDirectoryStorageReference(
         options.destination,
@@ -471,7 +601,7 @@ export async function captureOfflineVideo({
       await putAsset({ ...asset, packageId }, directoryStorage)
     }
 
-    await captureTimelineFrames({
+    const capturedFrames = await captureTimelineFrames({
       originalState,
       packageId,
       progress: options.onProgress,
@@ -479,9 +609,20 @@ export async function captureOfflineVideo({
       signal: options.signal,
       size,
       storage: directoryStorage,
-      thumbnailByScene: new Map(views.map((view) => [view.id, view.thumbnailBlob])),
       timeline,
-      viewByScene: new Map(views.map((view) => [view.id, view])),
+      views,
+    })
+    const capturedScenes = timeline.scenes.map((scene) => {
+      const popupAnchor = capturedFrames.popupAnchors.get(scene.id)
+      return popupAnchor && scene.popup
+        ? {
+            ...scene,
+            popup: {
+              ...scene.popup,
+              anchor: popupAnchor,
+            },
+          }
+        : scene
     })
 
     const encoded = await encodeVideoFrames({
@@ -509,16 +650,17 @@ export async function captureOfflineVideo({
     })
     const verifiedVideo = await verifyVideoBlob(
       encoded.blob,
-      timeline.scenes,
+      capturedScenes,
       timeline.durationMs,
       options.signal,
     )
     const assetBytes = assets.reduce((total, asset) => total + asset.blob.size, 0)
     const completed = await finalizePackage({
       ...stagingPackage,
-      byteSize: encoded.blob.size + views[0].thumbnailBlob.size + assetBytes,
+      byteSize: encoded.blob.size + capturedFrames.thumbnailBlob.size + assetBytes,
       durationMs: verifiedVideo.durationMs,
       scenes: verifiedVideo.scenes,
+      thumbnailBlob: capturedFrames.thumbnailBlob,
       videoBlob: directoryStorage ? undefined : encoded.blob,
       videoFilePath: directoryStorage ? encoded.fileName : undefined,
       videoMimeType: encoded.mimeType,

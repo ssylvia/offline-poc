@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SavedVideoPackage } from '../types.ts'
 import { SavedVideoLibrary } from './SavedVideoLibrary.tsx'
@@ -118,5 +118,22 @@ describe('SavedVideoLibrary', () => {
     expect(screen.getByText('The attachment could not be downloaded.')).toBeInTheDocument()
     expect(screen.getByText('Package warning')).toBeInTheDocument()
     expect(screen.getByText('Temporary storage exceeded 250 MB.')).toBeInTheDocument()
+  })
+
+  it('locks package actions while a capture is running', () => {
+    const { container } = render(
+      <SavedVideoLibrary
+        disabled
+        packages={[createPackage('package-busy')]}
+        onDelete={vi.fn()}
+        onExport={vi.fn()}
+        onOpen={vi.fn()}
+        onRecapture={vi.fn()}
+      />,
+    )
+
+    const buttons = within(container).getAllByRole('button')
+    expect(buttons).not.toHaveLength(0)
+    expect(buttons.every((button) => button.hasAttribute('disabled'))).toBe(true)
   })
 })

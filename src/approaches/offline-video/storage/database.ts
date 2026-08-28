@@ -174,7 +174,7 @@ export async function putFrame(
     await database.put('temporaryFrames', frame)
     return
   }
-  const payloadPath = `frames/${frame.index}.png`
+  const payloadPath = `frames/${encodeURIComponent(frame.frameId)}.png`
   await writePackageFile(storage, payloadPath, frame.blob)
   await database.put('temporaryFrames', {
     ...frame,
@@ -232,8 +232,34 @@ export async function getFrame(
   }
 }
 
+export async function getFrameById(
+  packageId: string,
+  frameId: string,
+): Promise<VideoCaptureFrame | undefined> {
+  const database = await getDatabase()
+  const frame = await database.get('temporaryFrames', [packageId, frameId])
+  if (!frame?.payloadPath) {
+    return frame
+  }
+  const packageRecord = await database.get('packages', packageId)
+  if (packageRecord?.payloadStorage?.kind !== 'directory') {
+    throw new Error(`Temporary frame ${frameId} has no folder-backed package reference.`)
+  }
+  return {
+    ...frame,
+    blob: await readPackageFile(packageRecord.payloadStorage, frame.payloadPath),
+  }
+}
+
 export async function deleteFrame(packageId: string, frameId: string): Promise<void> {
   const database = await getDatabase()
+  const frame = await database.get('temporaryFrames', [packageId, frameId])
+  if (frame?.payloadPath) {
+    const packageRecord = await database.get('packages', packageId)
+    if (packageRecord?.payloadStorage?.kind === 'directory') {
+      await deletePackageEntry(packageRecord.payloadStorage, frame.payloadPath)
+    }
+  }
   await database.delete('temporaryFrames', [packageId, frameId])
 }
 

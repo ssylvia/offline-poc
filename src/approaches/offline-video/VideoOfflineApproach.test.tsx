@@ -140,6 +140,10 @@ describe('VideoOfflineApproach', () => {
 
     expect(await screen.findByText('player package-1 assets asset-1')).toBeInTheDocument()
     expect(screen.getByText('library package-2,package-1')).toBeInTheDocument()
+    expect(screen.getByText('player package-1 assets asset-1').closest('.workspace')).toHaveClass(
+      'workspace-video-explorer',
+    )
+    expect(screen.queryByText('composer')).not.toBeInTheDocument()
     expect(mocks.videoCaptureMapLoads).toBe(0)
   })
 

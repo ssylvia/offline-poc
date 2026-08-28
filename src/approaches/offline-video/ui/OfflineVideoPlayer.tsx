@@ -278,6 +278,8 @@ export function OfflineVideoPlayer({
   const videoRef = useRef<HTMLVideoElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
   const [currentTimeMs, setCurrentTimeMs] = useState(0)
+  const [hasEnded, setHasEnded] = useState(false)
+  const [isPlaying, setIsPlaying] = useState(false)
   const [navigationTargetIndex, setNavigationTargetIndex] = useState<number>()
   const [contentRect, setContentRect] = useState<MediaContentRect>({
     height: 0,
@@ -324,6 +326,8 @@ export function OfflineVideoPlayer({
     video.pause()
     video.currentTime = scene.timestampMs / 1_000
     setCurrentTimeMs(scene.timestampMs)
+    setHasEnded(false)
+    setIsPlaying(false)
     setNavigationTargetIndex(undefined)
   }, [])
 
@@ -338,6 +342,7 @@ export function OfflineVideoPlayer({
     }
 
     const currentScene = activeScene ?? packageRecord.scenes[activeSceneIndex]
+    setHasEnded(false)
     setNavigationTargetIndex(scene.index)
     if (
       currentScene
@@ -347,10 +352,44 @@ export function OfflineVideoPlayer({
       setCurrentTimeMs(currentScene.holdEndMs)
     }
     void video.play().catch(() => {
+      setIsPlaying(false)
       setNavigationTargetIndex(undefined)
       onError('The saved video could not play the transition to the selected view.')
     })
+    setIsPlaying(true)
   }, [activeScene, activeSceneIndex, onError, packageRecord.scenes, stopAtScene])
+
+  const toggleTourPlayback = useCallback(() => {
+    const video = videoRef.current
+    if (!video) {
+      return
+    }
+    if (isPlaying) {
+      setNavigationTargetIndex(undefined)
+      setIsPlaying(false)
+      video.pause()
+      return
+    }
+    const lastScene = packageRecord.scenes.at(-1)
+    const frameDurationMs = 1_000 / Math.max(1, packageRecord.frameRate)
+    if (
+      hasEnded
+      || (
+        lastScene
+        && video.currentTime * 1_000 >= lastScene.holdEndMs - frameDurationMs
+      )
+    ) {
+      video.currentTime = 0
+      setCurrentTimeMs(0)
+    }
+    setHasEnded(false)
+    setNavigationTargetIndex(undefined)
+    setIsPlaying(true)
+    void video.play().catch(() => {
+      setIsPlaying(false)
+      onError('The saved map tour could not play.')
+    })
+  }, [hasEnded, isPlaying, onError, packageRecord.frameRate, packageRecord.scenes])
 
   const handleTimeUpdate = useCallback((video: HTMLVideoElement) => {
     const nextTimeMs = video.currentTime * 1_000
@@ -431,8 +470,20 @@ export function OfflineVideoPlayer({
             if (targetScene) {
               stopAtScene(event.currentTarget, targetScene)
             } else {
-              setCurrentTimeMs(packageRecord.durationMs)
+              const lastScene = packageRecord.scenes.at(-1)
+              if (lastScene) {
+                stopAtScene(event.currentTarget, lastScene)
+              } else {
+                setCurrentTimeMs(packageRecord.durationMs)
+                setIsPlaying(false)
+              }
             }
+            setHasEnded(true)
+          }}
+          onPause={() => setIsPlaying(false)}
+          onPlay={() => {
+            setHasEnded(false)
+            setIsPlaying(true)
           }}
           onSeeked={(event) => setCurrentTimeMs(event.currentTarget.currentTime * 1_000)}
           onTimeUpdate={(event) => handleTimeUpdate(event.currentTarget)}
@@ -445,56 +496,89 @@ export function OfflineVideoPlayer({
             <VideoPopup popup={popup} assetUrls={assetUrls} cardStyle={popupLayout.cardStyle} />
           </div>
         )}
-      </div>
-
-      <div className="video-scene-status" role="status" aria-live="polite">
-        <strong>{sceneSummary}</strong>
-        <span>{formatBytes(packageRecord.byteSize)} package</span>
-      </div>
-      <nav className="video-scene-navigation" aria-label="Captured views">
-        <button
-          type="button"
-          className="button button-secondary button-small"
-          disabled={navigationTargetIndex !== undefined || displayedSceneIndex <= 0}
-          onClick={() => navigateToScene(
-            packageRecord.scenes[Math.max(0, displayedSceneIndex - 1)],
-          )}
-          aria-label="Go to the previous captured view"
-        >
-          Previous view
-        </button>
-        <div className="video-scene-list">
-          {packageRecord.scenes.map((scene) => (
-            <button
-              key={scene.id}
-              type="button"
-              className={scene.index === displayedSceneIndex ? 'is-active' : undefined}
-              aria-current={scene.index === displayedSceneIndex ? 'true' : undefined}
-              aria-label={`Go to view ${scene.index + 1}: ${scene.name}`}
-              disabled={navigationTargetIndex !== undefined}
-              onClick={() => navigateToScene(scene)}
-            >
-              {scene.index + 1}. {scene.name}
-            </button>
-          ))}
+        <div className="video-map-controls" role="group" aria-label="Map tour controls">
+          <button
+            type="button"
+            aria-label="Return to the first captured view"
+            disabled={isPlaying || navigationTargetIndex !== undefined || displayedSceneIndex <= 0}
+            onClick={() => {
+              const firstScene = packageRecord.scenes[0]
+              const video = videoRef.current
+              if (firstScene && video) {
+                stopAtScene(video, firstScene)
+              }
+            }}
+            title="Home"
+          >
+            <span aria-hidden="true">⌂</span>
+          </button>
+          <button
+            type="button"
+            disabled={
+              isPlaying
+              || navigationTargetIndex !== undefined
+              || displayedSceneIndex <= 0
+            }
+            onClick={() => navigateToScene(
+              packageRecord.scenes[Math.max(0, displayedSceneIndex - 1)],
+            )}
+            aria-label="Go to the previous captured view"
+            title="Previous view"
+          >
+            <span aria-hidden="true">‹</span>
+          </button>
+          <button
+            type="button"
+            className="video-tour-toggle"
+            aria-label={isPlaying ? 'Pause map tour' : 'Play map tour'}
+            aria-pressed={isPlaying}
+            onClick={toggleTourPlayback}
+            title={isPlaying ? 'Pause tour' : 'Play tour'}
+          >
+            <span aria-hidden="true">{isPlaying ? 'Ⅱ' : '▶'}</span>
+          </button>
+          <button
+            type="button"
+            disabled={
+              isPlaying
+              || navigationTargetIndex !== undefined
+              || displayedSceneIndex >= packageRecord.scenes.length - 1
+            }
+            onClick={() => navigateToScene(
+              packageRecord.scenes[
+                Math.min(packageRecord.scenes.length - 1, displayedSceneIndex + 1)
+              ],
+            )}
+            aria-label="Go to the next captured view"
+            title="Next view"
+          >
+            <span aria-hidden="true">›</span>
+          </button>
         </div>
-        <button
-          type="button"
-          className="button button-secondary button-small"
-          disabled={
-            navigationTargetIndex !== undefined
-            || displayedSceneIndex >= packageRecord.scenes.length - 1
-          }
-          onClick={() => navigateToScene(
-            packageRecord.scenes[
-              Math.min(packageRecord.scenes.length - 1, displayedSceneIndex + 1)
-            ],
-          )}
-          aria-label="Go to the next captured view"
-        >
-          Next view
-        </button>
-      </nav>
+
+        <div className="video-scene-status" role="status" aria-live="polite">
+          <strong>{sceneSummary}</strong>
+          <span>{formatBytes(packageRecord.byteSize)} offline package</span>
+        </div>
+        <nav className="video-scene-navigation" aria-label="Captured views">
+          <div className="video-scene-list">
+            {packageRecord.scenes.map((scene) => (
+              <button
+                key={scene.id}
+                type="button"
+                className={scene.index === displayedSceneIndex ? 'is-active' : undefined}
+                aria-current={scene.index === displayedSceneIndex ? 'true' : undefined}
+                aria-label={`Go to view ${scene.index + 1}: ${scene.name}`}
+                disabled={isPlaying || navigationTargetIndex !== undefined}
+                onClick={() => navigateToScene(scene)}
+              >
+                <span>{scene.index + 1}</span>
+                {scene.name}
+              </button>
+            ))}
+          </div>
+        </nav>
+      </div>
     </div>
   )
 }

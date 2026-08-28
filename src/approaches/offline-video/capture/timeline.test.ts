@@ -6,6 +6,7 @@ import {
   calculateTransitionDurationMs,
   createVideoTimeline,
   easeInOutCubic,
+  estimateVideoCapture,
   interpolatePanViewpoint,
   videoTimingConstants,
 } from './timeline.ts'
@@ -85,6 +86,30 @@ describe('offline video timeline', () => {
     expect(panAndZoom.layerCrossFade).toBe(0)
   })
 
+  it('normalizes pan timing to the fixed output viewport', () => {
+    const narrowSource = makeView('first', 0, 1_000, 100)
+    const wideDestination = makeView('first', 100, 1_000, 200)
+    narrowSource.mapViewportSize = { height: 300, width: 500 }
+    wideDestination.mapViewportSize = { height: 600, width: 1_000 }
+    const consistentlyWideSource = makeView('first', 0, 1_000, 200)
+    const consistentlyWideDestination = makeView('first', 100, 1_000, 200)
+    consistentlyWideSource.mapViewportSize = { height: 600, width: 1_000 }
+    consistentlyWideDestination.mapViewportSize = { height: 600, width: 1_000 }
+    const outputSize = { height: 720, width: 1_000 }
+
+    expect(calculateTransitionFrameCounts(
+      narrowSource,
+      wideDestination,
+      VIDEO_CAPTURE_FRAME_RATE,
+      outputSize,
+    )).toEqual(calculateTransitionFrameCounts(
+      consistentlyWideSource,
+      consistentlyWideDestination,
+      VIDEO_CAPTURE_FRAME_RATE,
+      outputSize,
+    ))
+  })
+
   it('ease-in-out interpolates pan and rotation while preserving source zoom', () => {
     const source = makeView('first', 0, 1_000).viewpoint
     const destination = makeView('second', 100, 4_000).viewpoint
@@ -131,6 +156,27 @@ describe('offline video timeline', () => {
     expect(transitionFrames.every((frame) => frame.layers[0]?.visible)).toBe(true)
     expect(transitionFrames.every((frame) => frame.layerProgress !== undefined)).toBe(true)
     expect(timeline.frames.at(-1)?.sceneId).toBe('second')
+  })
+
+  it('includes the largest zoom timeline pass in temporary storage estimates', () => {
+    const views = [
+      makeView('first', 0, 8_000),
+      makeView('second', 200, 1_000),
+    ]
+    const estimate = estimateVideoCapture(views)
+
+    expect(estimate).toBeDefined()
+    expect(estimate?.workingBytes).toBeGreaterThan(
+      (estimate?.frameCount ?? 0) * views[0].thumbnailBlob.size,
+    )
+  })
+
+  it('returns no estimate instead of throwing for incompatible draft layers', () => {
+    const source = makeView('first', 0, 8_000)
+    const destination = makeView('second', 200, 1_000)
+    destination.layers = []
+
+    expect(estimateVideoCapture([source, destination])).toBeUndefined()
   })
 
   it('uses a standalone one-second cross-fade for layer-only changes', () => {

@@ -1,7 +1,16 @@
 import { formatBytes } from '../../../shared/format.ts'
 import { useObjectUrl } from '../../../shared/use-object-url.ts'
 import { estimateVideoCapture } from '../capture/timeline.ts'
-import type { VideoCaptureProgress, VideoDraftView } from '../types.ts'
+import {
+  isVideoOutputSizeValid,
+  VIDEO_OUTPUT_SIZE_LIMITS,
+} from '../capture/video-settings.ts'
+import {
+  VIDEO_CAPTURE_FRAME_RATE,
+  type VideoCaptureProgress,
+  type VideoDraftView,
+  type VideoOutputSize,
+} from '../types.ts'
 
 interface VideoComposerPanelProps {
   isCapturing: boolean
@@ -11,10 +20,12 @@ interface VideoComposerPanelProps {
   onCancel: () => void
   onCapture: () => void
   onMove: (viewId: string, direction: -1 | 1) => void
+  onOutputSizeChange: (size: VideoOutputSize) => void
   onRemove: (viewId: string) => void
   onRename: (viewId: string, name: string) => void
   onUpdate: (viewId: string) => void
   progress?: VideoCaptureProgress
+  outputSize: VideoOutputSize
   totalWarningCount?: number
   views: VideoDraftView[]
   warningCountByView?: Record<string, number>
@@ -126,17 +137,21 @@ export function VideoComposerPanel({
   onCancel,
   onCapture,
   onMove,
+  onOutputSizeChange,
   onRemove,
   onRename,
   onUpdate,
+  outputSize,
   progress,
   totalWarningCount = 0,
   views,
   warningCountByView = {},
 }: VideoComposerPanelProps) {
-  const estimate = estimateVideoCapture(views)
+  const estimate = estimateVideoCapture(views, VIDEO_CAPTURE_FRAME_RATE, outputSize)
   const isLarge = (estimate?.workingBytes ?? 0) >= 250 * 1024 * 1024
   const isBusy = isCapturing || isRecordingView
+  const isOutputSizeValid = isVideoOutputSizeValid(outputSize)
+  const outputSizeLocked = isBusy || views.length > 0
 
   return (
     <section className="video-composer" aria-labelledby="video-composer-heading">
@@ -146,13 +161,76 @@ export function VideoComposerPanel({
       </div>
       <p className="scope-copy">
         Pan, zoom, toggle layers, and optionally open a popup. Transitions synchronize pan,
-        zoom, rotation, and layer changes so saved playback feels more like natural map
+        zoom, rotation, and ArcGIS layer opacity so saved playback feels more like natural map
         navigation. Add each final view in playback order.
       </p>
+      <fieldset className="video-settings" disabled={outputSizeLocked}>
+        <legend>Video settings</legend>
+        <p>
+          Choose a fixed capture viewport. The video uses these dimensions instead of the browser
+          window.
+        </p>
+        <div className="video-size-fields">
+          <label>
+            <span>Width</span>
+            <input
+              aria-label="Video width in pixels"
+              inputMode="numeric"
+              max={VIDEO_OUTPUT_SIZE_LIMITS.maximumWidth}
+              min={VIDEO_OUTPUT_SIZE_LIMITS.minimumWidth}
+              onChange={(event) => {
+                if (Number.isFinite(event.currentTarget.valueAsNumber)) {
+                  onOutputSizeChange({
+                    ...outputSize,
+                    width: event.currentTarget.valueAsNumber,
+                  })
+                }
+              }}
+              step={2}
+              type="number"
+              value={outputSize.width}
+            />
+          </label>
+          <span aria-hidden="true">×</span>
+          <label>
+            <span>Height</span>
+            <input
+              aria-label="Video height in pixels"
+              inputMode="numeric"
+              max={VIDEO_OUTPUT_SIZE_LIMITS.maximumHeight}
+              min={VIDEO_OUTPUT_SIZE_LIMITS.minimumHeight}
+              onChange={(event) => {
+                if (Number.isFinite(event.currentTarget.valueAsNumber)) {
+                  onOutputSizeChange({
+                    ...outputSize,
+                    height: event.currentTarget.valueAsNumber,
+                  })
+                }
+              }}
+              step={2}
+              type="number"
+              value={outputSize.height}
+            />
+          </label>
+        </div>
+      </fieldset>
+      {views.length > 0 && (
+        <p className="muted-copy">
+          Remove all saved views to change the capture viewport.
+        </p>
+      )}
+      {!isOutputSizeValid && (
+        <p className="warning-text" role="alert">
+          Use even dimensions from {VIDEO_OUTPUT_SIZE_LIMITS.minimumWidth}×
+          {VIDEO_OUTPUT_SIZE_LIMITS.minimumHeight} through
+          {' '}
+          {VIDEO_OUTPUT_SIZE_LIMITS.maximumWidth}×{VIDEO_OUTPUT_SIZE_LIMITS.maximumHeight}.
+        </p>
+      )}
       <button
         type="button"
         className="button button-wide"
-        disabled={isBusy || !isReady}
+        disabled={isBusy || !isReady || !isOutputSizeValid}
         onClick={onAdd}
       >
         {isRecordingView ? 'Saving current view…' : 'Add current view'}
@@ -197,7 +275,7 @@ export function VideoComposerPanel({
       {isLarge && (
         <p className="warning-text" role="status">
           This composition may require substantial temporary storage. Remove views or reduce map
-          viewport size if capture fails.
+          video dimensions if capture fails.
         </p>
       )}
       {totalWarningCount > 0 && (
@@ -232,7 +310,7 @@ export function VideoComposerPanel({
           <button
             type="button"
             className="button"
-            disabled={views.length === 0 || !isReady}
+            disabled={views.length === 0 || !isReady || !isOutputSizeValid}
             onClick={onCapture}
           >
             Create offline video

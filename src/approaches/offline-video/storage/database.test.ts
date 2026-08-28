@@ -5,6 +5,7 @@ import {
   deletePackage,
   finalizePackage,
   getSavedPackage,
+  getFrameById,
   listAssets,
   listFrames,
   listSavedPackages,
@@ -99,6 +100,10 @@ describe('offline video storage', () => {
     expect((await listFrames(stagingPackage.packageId)).map((entry) => entry.frameId)).toEqual([
       stagedFrame.frameId,
     ])
+    expect(await getFrameById(stagingPackage.packageId, stagedFrame.frameId)).toMatchObject({
+      frameId: stagedFrame.frameId,
+      index: 0,
+    })
   })
 
   it('finalizes packages by publishing metadata and clearing temporary frames', async () => {

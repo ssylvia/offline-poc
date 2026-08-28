@@ -32,11 +32,13 @@ import type {
   VideoCaptureProgress,
   VideoCaptureWarning,
   VideoDraftView,
+  VideoOutputSize,
   VideoPackageAsset,
 } from './types.ts'
 import { OfflineVideoPlayer } from './ui/OfflineVideoPlayer.tsx'
 import { SavedVideoLibrary } from './ui/SavedVideoLibrary.tsx'
 import { VideoComposerPanel } from './ui/VideoComposerPanel.tsx'
+import { DEFAULT_VIDEO_OUTPUT_SIZE } from './capture/video-settings.ts'
 
 interface VideoOfflineApproachProps {
   isOnline: boolean
@@ -58,7 +60,6 @@ let liveCaptureSupportPromise: Promise<{
   captureLayerStates: typeof import('./capture/view-state.ts').captureLayerStates
   captureMapViewPopup: typeof import('./capture/popup.ts').captureMapViewPopup
   captureOfflineVideo: typeof import('./capture/capture-offline-video.ts').captureOfflineVideo
-  getVideoOutputSize: typeof import('./capture/view-state.ts').getVideoOutputSize
   takeMapOnlyScreenshot: typeof import('./capture/view-state.ts').takeMapOnlyScreenshot
   waitForViewStable: typeof import('./capture/view-state.ts').waitForViewStable
 }> | undefined
@@ -72,7 +73,6 @@ async function loadLiveCaptureSupport() {
     captureLayerStates: viewStateModule.captureLayerStates,
     captureMapViewPopup: popupModule.captureMapViewPopup,
     captureOfflineVideo: captureModule.captureOfflineVideo,
-    getVideoOutputSize: viewStateModule.getVideoOutputSize,
     takeMapOnlyScreenshot: viewStateModule.takeMapOnlyScreenshot,
     waitForViewStable: viewStateModule.waitForViewStable,
   }))
@@ -147,6 +147,9 @@ export function VideoOfflineApproach({
   const [selectedPackage, setSelectedPackage] = useState<SavedVideoPackage>()
   const [selectedAssets, setSelectedAssets] = useState<VideoPackageAsset[]>([])
   const [draftViews, setDraftViews] = useState<VideoDraftView[]>([])
+  const [videoOutputSize, setVideoOutputSize] = useState<VideoOutputSize>(
+    () => ({ ...DEFAULT_VIDEO_OUTPUT_SIZE }),
+  )
   const [draftArtifactsByView, setDraftArtifactsByView] = useState<DraftArtifactsByView>({})
   const [storageEstimate, setStorageEstimate] = useState<StorageEstimate>({})
   const [persistentStorage, setPersistentStorage] = useState<boolean>()
@@ -251,6 +254,7 @@ export function VideoOfflineApproach({
       previousWebMapId.current = route.webmapId
       setInputValue(route.webmapId ?? '')
       setDraftViews([])
+      setVideoOutputSize({ ...DEFAULT_VIDEO_OUTPUT_SIZE })
       setDraftArtifactsByView({})
       setSelectedAssets([])
       setLiveSession(undefined)
@@ -339,6 +343,19 @@ export function VideoOfflineApproach({
     return () => captureController.current?.abort()
   }, [])
 
+  useEffect(() => {
+    if (!isCapturing) {
+      return
+    }
+    const abortCapture = () => captureController.current?.abort()
+    window.addEventListener('beforeunload', abortCapture)
+    window.addEventListener('popstate', abortCapture)
+    return () => {
+      window.removeEventListener('beforeunload', abortCapture)
+      window.removeEventListener('popstate', abortCapture)
+    }
+  }, [isCapturing])
+
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault()
     const normalized = normalizeWebMapId(inputValue)
@@ -403,16 +420,14 @@ export function VideoOfflineApproach({
     try {
       const {
         captureLayerStates,
-        getVideoOutputSize,
         takeMapOnlyScreenshot,
         waitForViewStable,
       } = await loadLiveCaptureSupport()
       await waitForViewStable(liveSession.view)
       const popupResult = await captureCurrentPopup(liveSession, nextViewId)
-      const outputSize = getVideoOutputSize(liveSession.view)
       const thumbnailBlob = await takeMapOnlyScreenshot(
         liveSession.view,
-        outputSize,
+        videoOutputSize,
       )
       if (!liveSession.view.extent) {
         throw new Error('The live WebMap does not expose an extent for capture.')
@@ -423,6 +438,10 @@ export function VideoOfflineApproach({
         extent: serializeArcGisJson(liveSession.view.extent),
         id: nextViewId,
         layers: captureLayerStates(liveSession.map),
+        mapViewportSize: {
+          height: liveSession.view.height,
+          width: liveSession.view.width,
+        },
         name: existingView?.name ?? `View ${draftViews.length + 1}`,
         popup: popupResult.popup,
         thumbnailBlob,
@@ -438,7 +457,7 @@ export function VideoOfflineApproach({
     } finally {
       setIsRecordingView(false)
     }
-  }, [captureCurrentPopup, draftViews.length, liveSession])
+  }, [captureCurrentPopup, draftViews.length, liveSession, videoOutputSize])
 
   const handleCapture = useCallback(async () => {
     if (!liveSession) {
@@ -484,6 +503,7 @@ export function VideoOfflineApproach({
         assets: draftAssets,
         options: {
           onProgress: setProgress,
+          outputSize: videoOutputSize,
           signal: controller.signal,
           destination: directoryStorage.destination,
         },
@@ -512,6 +532,7 @@ export function VideoOfflineApproach({
     draftWarnings,
     liveSession,
     refreshPackages,
+    videoOutputSize,
   ])
 
   const openSaved = useCallback((packageRecord: SavedVideoPackage) => {
@@ -574,7 +595,7 @@ export function VideoOfflineApproach({
   }, [isOnline, navigateToComposer, navigateToSavedVideo, refreshPackages, route.savedVideoPackageId])
 
   return (
-    <div className="workspace">
+    <div className={`workspace${activeMode === 'offline' ? ' workspace-video-explorer' : ''}`}>
       <aside className="control-panel">
         <section aria-labelledby="video-approach-heading">
           <div className="section-heading">
@@ -593,10 +614,17 @@ export function VideoOfflineApproach({
                 inputMode="text"
                 placeholder="32-character item ID"
                 spellCheck="false"
+                disabled={isCapturing || isRecordingView}
                 value={inputValue}
                 onChange={(event) => setInputValue(event.target.value)}
               />
-              <button type="submit" className="button">Load</button>
+              <button
+                type="submit"
+                className="button"
+                disabled={isCapturing || isRecordingView}
+              >
+                Load
+              </button>
             </div>
           </form>
           <p className="muted-copy">
@@ -657,7 +685,7 @@ export function VideoOfflineApproach({
           </div>
         )}
 
-        {(route.webmapId || draftViews.length > 0) && (
+        {activeMode === 'live' && (route.webmapId || draftViews.length > 0) && (
           <VideoComposerPanel
             isCapturing={isCapturing}
             isReady={activeMode === 'live' && liveSession !== undefined}
@@ -683,6 +711,8 @@ export function VideoOfflineApproach({
               }
               void captureDraftView(existingView)
             }}
+            onOutputSizeChange={setVideoOutputSize}
+            outputSize={videoOutputSize}
             progress={progress}
             totalWarningCount={draftWarnings.length}
             views={draftViews}
@@ -730,6 +760,7 @@ export function VideoOfflineApproach({
         </section>
 
         <SavedVideoLibrary
+          disabled={isCapturing || isRecordingView}
           packages={savedPackages}
           onDelete={(packageRecord) => void removeSaved(packageRecord)}
           onExport={(packageRecord) => void exportSaved(packageRecord)}
@@ -762,6 +793,7 @@ export function VideoOfflineApproach({
             )}
           >
             <LazyVideoCaptureMap
+              isInteractionDisabled={isCapturing || isRecordingView}
               key={route.webmapId}
               webmapId={route.webmapId}
               onError={handleMapError}

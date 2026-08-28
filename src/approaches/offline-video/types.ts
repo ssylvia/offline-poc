@@ -106,6 +106,7 @@ export interface VideoDraftView {
   extent: JsonObject
   id: string
   layers: CapturedLayerState[]
+  mapViewportSize?: VideoOutputSize
   name: string
   popup?: CapturedPopup
   thumbnailBlob: Blob
@@ -221,6 +222,7 @@ export interface VideoCaptureProgress {
 export interface VideoCaptureOptions {
   destination?: DirectoryDestination
   onProgress: (progress: VideoCaptureProgress) => void
+  outputSize: VideoOutputSize
   signal: AbortSignal
 }
 
