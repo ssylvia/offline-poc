@@ -10,12 +10,18 @@ import {
 } from '../../../shared/arcgis/index.ts'
 
 interface VideoCaptureMapProps {
+  isInteractionDisabled: boolean
   onError: (message: string) => void
   onReady: (session: LiveMapSession) => void
   webmapId: string
 }
 
-export function VideoCaptureMap({ onError, onReady, webmapId }: VideoCaptureMapProps) {
+export function VideoCaptureMap({
+  isInteractionDisabled,
+  onError,
+  onReady,
+  webmapId,
+}: VideoCaptureMapProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [isLoading, setIsLoading] = useState(true)
 
@@ -79,8 +85,14 @@ export function VideoCaptureMap({ onError, onReady, webmapId }: VideoCaptureMapP
   }, [onError, onReady, webmapId])
 
   return (
-    <div className="map-host">
-      <div className="map-container" ref={containerRef} />
+    <div className={`map-host${isInteractionDisabled ? ' is-capture-locked' : ''}`}>
+      <div className="map-container" inert={isInteractionDisabled} ref={containerRef} />
+      {isInteractionDisabled && (
+        <div className="map-capture-lock" role="status">
+          <span className="spinner" aria-hidden="true" />
+          Capturing from the fixed video viewport…
+        </div>
+      )}
       {isLoading && (
         <div className="map-loading" role="status">
           <span className="spinner" aria-hidden="true" />

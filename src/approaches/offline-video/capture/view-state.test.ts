@@ -1,12 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   applyLayerStates,
-  createTransitionImageFrame,
-  createZoomImageFrame,
-  crossFadeImageBlobs,
+  composeZoomTimelineFrame,
   dataUrlToBlob,
-  getVideoOutputSize,
-  planZoomDetailSteps,
+  takeMapOnlyScreenshot,
 } from './view-state.ts'
 
 describe('offline video view state', () => {
@@ -29,7 +26,43 @@ describe('offline video view state', () => {
     expect(() => dataUrlToBlob('data:image/png;base64,%%%')).toThrow('could not be decoded')
   })
 
-  it('cross-fades two images without rendering intermediate map zooms', async () => {
+  it('captures the exact configured output size instead of deriving it from the view', async () => {
+    const takeScreenshot = vi.fn(async () => ({
+      dataUrl: 'data:image/png;base64,aGVsbG8=',
+    }))
+    const view = {
+      popup: { visible: true },
+      takeScreenshot,
+      updating: false,
+    }
+
+    const screenshot = await takeMapOnlyScreenshot(
+      view as never,
+      { height: 1_080, width: 1_920 },
+    )
+
+    expect(await screenshot.text()).toBe('hello')
+    expect(takeScreenshot).toHaveBeenCalledWith({
+      format: 'png',
+      height: 1_080,
+      width: 1_920,
+    })
+    expect(view.popup.visible).toBe(true)
+  })
+
+  it('reuses a native timeline image without decoding or recompressing it', async () => {
+    const source = new Blob(['source'], { type: 'image/png' })
+    const createImageBitmapMock = vi.fn()
+    vi.stubGlobal('createImageBitmap', createImageBitmapMock)
+
+    await expect(composeZoomTimelineFrame(
+      [{ blob: source, imageScale: 1, opacity: 1 }],
+      { height: 720, width: 1_280 },
+    )).resolves.toBe(source)
+    expect(createImageBitmapMock).not.toHaveBeenCalled()
+  })
+
+  it('stretches and cross-fades aligned zoom timeline images', async () => {
     const globalAlphaValues: number[] = []
     const drawImage = vi.fn()
     const context = {
@@ -42,7 +75,7 @@ describe('offline video view state', () => {
       getContext: vi.fn(() => context),
       height: 0,
       toBlob: vi.fn((callback: BlobCallback) => {
-        callback(new Blob(['cross-fade'], { type: 'image/png' }))
+        callback(new Blob(['timeline'], { type: 'image/png' }))
       }),
       width: 0,
     }
@@ -55,136 +88,28 @@ describe('offline video view state', () => {
       .mockResolvedValueOnce(bitmaps[1]))
     vi.spyOn(document, 'createElement').mockReturnValue(canvas as never)
 
-    const result = await crossFadeImageBlobs(
-      new Blob(['source']),
-      new Blob(['destination']),
-      { height: 720, width: 1_280 },
-      0.25,
-    )
+    const result = await composeZoomTimelineFrame([
+      {
+        blob: new Blob(['expanded']),
+        imageScale: 1.5,
+        opacity: 1,
+      },
+      {
+        blob: new Blob(['next-detail']),
+        imageScale: 1,
+        opacity: 0.4,
+      },
+    ], { height: 600, width: 800 })
 
-    expect(canvas).toMatchObject({ height: 720, width: 1_280 })
-    expect(globalAlphaValues).toEqual([1, 0.25])
-    expect(drawImage).toHaveBeenCalledTimes(2)
-    expect(await result.text()).toBe('cross-fade')
+    expect(canvas).toMatchObject({ height: 600, width: 800 })
+    expect(globalAlphaValues).toEqual([1, 0.4])
+    expect(drawImage).toHaveBeenNthCalledWith(1, bitmaps[0], -200, -150, 1_200, 900)
+    expect(drawImage).toHaveBeenNthCalledWith(2, bitmaps[1], 0, 0, 800, 600)
+    expect(await result.text()).toBe('timeline')
     expect(bitmaps.every((bitmap) => bitmap.close.mock.calls.length === 1)).toBe(true)
   })
 
-  it('expands a source image when zooming in', async () => {
-    const drawImage = vi.fn()
-    const canvas = {
-      getContext: vi.fn(() => ({ drawImage })),
-      height: 0,
-      toBlob: vi.fn((callback: BlobCallback) => {
-        callback(new Blob(['zoom-in'], { type: 'image/png' }))
-      }),
-      width: 0,
-    }
-    const bitmap = { close: vi.fn() }
-    const createImageBitmapMock = vi.fn().mockResolvedValue(bitmap)
-    vi.stubGlobal('createImageBitmap', createImageBitmapMock)
-    vi.spyOn(document, 'createElement').mockReturnValue(canvas as never)
-    const source = new Blob(['source'])
-    const destination = new Blob(['destination'])
-
-    await createZoomImageFrame(
-      source,
-      destination,
-      { height: 600, width: 800 },
-      0.5,
-      4_000,
-      1_000,
-    )
-
-    expect(createImageBitmapMock).toHaveBeenCalledWith(source)
-    expect(drawImage).toHaveBeenCalledWith(bitmap, -400, -300, 1_600, 1_200)
-    expect(bitmap.close).toHaveBeenCalledOnce()
-  })
-
-  it('plans multi-level zoom detail steps between source and destination scales', () => {
-    expect(planZoomDetailSteps(8_000, 1_000)).toEqual([
-      { endProgress: 1 / 3, fromScale: 8_000, startProgress: 0, toScale: 4_000 },
-      { endProgress: 2 / 3, fromScale: 4_000, startProgress: 1 / 3, toScale: 2_000 },
-      { endProgress: 1, fromScale: 2_000, startProgress: 2 / 3, toScale: 1_000 },
-    ])
-  })
-
-  it('captures at higher resolution while preserving even encoder dimensions', () => {
-    expect(getVideoOutputSize({ width: 801, height: 451 } as never)).toEqual({
-      height: 902,
-      width: 1_602,
-    })
-    expect(getVideoOutputSize({ width: 1_800, height: 1_000 } as never)).toEqual({
-      height: 1_066,
-      width: 1_920,
-    })
-  })
-
-  it('contracts an expanded destination buffer when zooming out', async () => {
-    const drawImage = vi.fn()
-    const canvas = {
-      getContext: vi.fn(() => ({ drawImage })),
-      height: 0,
-      toBlob: vi.fn((callback: BlobCallback) => {
-        callback(new Blob(['zoom-out'], { type: 'image/png' }))
-      }),
-      width: 0,
-    }
-    const bitmap = { close: vi.fn() }
-    const createImageBitmapMock = vi.fn().mockResolvedValue(bitmap)
-    vi.stubGlobal('createImageBitmap', createImageBitmapMock)
-    vi.spyOn(document, 'createElement').mockReturnValue(canvas as never)
-    const source = new Blob(['source'])
-    const destinationBuffer = new Blob(['destination-buffer'])
-
-    await createZoomImageFrame(
-      source,
-      destinationBuffer,
-      { height: 600, width: 800 },
-      0.5,
-      1_000,
-      4_000,
-    )
-
-    expect(createImageBitmapMock).toHaveBeenCalledWith(destinationBuffer)
-    expect(drawImage).toHaveBeenCalledWith(bitmap, -400, -300, 1_600, 1_200)
-    expect(bitmap.close).toHaveBeenCalledOnce()
-  })
-
-  it('composes synchronized transition frames with zoom and layer blending', async () => {
-    const drawImage = vi.fn()
-    const globalAlphaValues: number[] = []
-    const canvas = {
-      getContext: vi.fn(() => ({
-        drawImage,
-        set globalAlpha(value: number) {
-          globalAlphaValues.push(value)
-        },
-      })),
-      height: 0,
-      toBlob: vi.fn((callback: BlobCallback) => {
-        callback(new Blob(['transition'], { type: 'image/png' }))
-      }),
-      width: 0,
-    }
-    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ close: vi.fn() })))
-    vi.spyOn(document, 'createElement').mockReturnValue(canvas as never)
-
-    const result = await createTransitionImageFrame(
-      new Blob(['source']),
-      new Blob(['destination']),
-      { height: 600, width: 800 },
-      0.95,
-      4_000,
-      1_000,
-      0.95,
-    )
-
-    expect(await result.text()).toBe('transition')
-    expect(drawImage).toHaveBeenCalled()
-    expect(globalAlphaValues).toContain(0.95)
-  })
-
-  it('closes a decoded zoom bitmap when capture is cancelled', async () => {
+  it('closes decoded timeline images when capture is cancelled', async () => {
     const controller = new AbortController()
     const reason = new DOMException('Capture cancelled', 'AbortError')
     const bitmap = { close: vi.fn() }
@@ -193,16 +118,11 @@ describe('offline video view state', () => {
       return bitmap
     }))
 
-    await expect(createZoomImageFrame(
-      new Blob(['source']),
-      new Blob(['destination']),
+    await expect(composeZoomTimelineFrame(
+      [{ blob: new Blob(['source']), imageScale: 1.25, opacity: 1 }],
       { height: 600, width: 800 },
-      0.5,
-      4_000,
-      1_000,
       controller.signal,
     )).rejects.toBe(reason)
-
     expect(bitmap.close).toHaveBeenCalledOnce()
   })
 
@@ -233,7 +153,6 @@ describe('offline video view state', () => {
         visible: false,
       },
     ])).toThrow('Missing layer')
-
     expect(firstLayer).toMatchObject({
       opacity: 0.25,
       visible: false,

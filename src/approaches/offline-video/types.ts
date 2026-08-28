@@ -221,6 +221,7 @@ export interface VideoCaptureProgress {
 export interface VideoCaptureOptions {
   destination?: DirectoryDestination
   onProgress: (progress: VideoCaptureProgress) => void
+  outputSize: VideoOutputSize
   signal: AbortSignal
 }
 
