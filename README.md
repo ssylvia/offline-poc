@@ -94,12 +94,13 @@ Use `?approach=offline-video` to capture final views in playback order. Each sav
 - browser-routable playback using `video-package=<saved-package-id>`
 - export as **two files**: `<name>.mp4` or `<name>.webm`, plus `<name>.json`
 
-Transitions are timed directly at **24 FPS**. Each movement pans first with ease-in-out motion,
-then expands the source image to zoom in or contracts a buffered destination image to zoom out.
-The zoom-out destination capture includes the surrounding map area, preventing blank edges during
-the contraction. Layer visibility and opacity changes follow as a separate cross-fade before the
-final view. Final views hold for three seconds, and their frames reuse the already captured final
-image.
+Transitions are timed directly at **24 FPS**. Pan, rotation, zoom, and layer visibility/opacity
+changes share one eased transition clock so movement stays in phase. During zooms, the renderer uses
+the current detail level while taking temporary intermediate screenshots for the next detail level,
+then blends across those detail boundaries with short cross-fades. Zoom-out transitions use
+destination/detail captures while shrinking so edges stay filled. Final views hold for three
+seconds, and their frames reuse the already captured final image. Offline playback hides native video
+controls and exposes only map-like saved-view navigation.
 
 There is no hard-coded view limit, but larger view counts and larger map viewports increase duration and temporary working storage. The UI warns once estimated temporary working storage reaches roughly **250 MB**, and capture can still fail earlier or later depending on browser quota/performance.
 

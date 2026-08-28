@@ -21,7 +21,6 @@ import {
   type VideoTimelineScene,
 } from '../types.ts'
 import {
-  capturedLayerStatesMatch,
   createVideoTimeline,
   estimateVideoCapture,
 } from './timeline.ts'
@@ -29,8 +28,7 @@ import { encodeVideoFrames } from './video-encoder.ts'
 import {
   applyLayerStates,
   captureLayerStates,
-  createZoomImageFrame,
-  crossFadeImageBlobs,
+  createTransitionImageFrame,
   getVideoOutputSize,
   takeMapOnlyScreenshot,
 } from './view-state.ts'
@@ -289,17 +287,13 @@ async function captureTimelineFrames(options: {
   } = options
 
   let captureError: unknown
-  let activeTransitionKey: string | undefined
-  let transitionDestination: Blob | undefined
-  let transitionSource: Blob | undefined
-  let lastRenderedBlob: Blob | undefined
   try {
     if (originalState.popup) {
       originalState.popup.visible = false
     }
     for (const frame of timeline.frames) {
       signal.throwIfAborted()
-      const phase = frame.phase ?? (frame.sceneId ? 'hold' : 'pan')
+      const phase = frame.phase
       let blob: Blob
       if (phase === 'hold') {
         const savedThumbnail = frame.sceneId
@@ -315,10 +309,7 @@ async function captureTimelineFrames(options: {
         } else {
           blob = savedThumbnail
         }
-        activeTransitionKey = undefined
-        transitionDestination = undefined
-        transitionSource = undefined
-      } else if (phase === 'zoom-animation' || phase === 'layer-crossfade') {
+      } else if (phase === 'transition') {
         if (
           !frame.transitionFromSceneId
           || !frame.transitionToSceneId
@@ -326,77 +317,49 @@ async function captureTimelineFrames(options: {
         ) {
           throw new Error(`Transition frame ${frame.index + 1} is incomplete.`)
         }
-        const transitionKey = `${phase}:${frame.transitionToSceneId}`
-        if (activeTransitionKey !== transitionKey) {
-          transitionSource = lastRenderedBlob
-            ?? thumbnailByScene.get(frame.transitionFromSceneId)
-          activeTransitionKey = transitionKey
-          if (phase === 'zoom-animation') {
-            const sourceView = viewByScene.get(frame.transitionFromSceneId)
-            const destinationView = viewByScene.get(frame.transitionToSceneId)
-            if (!sourceView || !destinationView) {
-              throw new Error(
-                `Zoom animation frame ${frame.index + 1} is missing captured view metadata.`,
-              )
-            }
-            const layersChanged = !capturedLayerStatesMatch(
-              sourceView.layers,
-              destinationView.layers,
-            )
-            if (layersChanged) {
-              applyLayerStates(session.map, sourceView.layers)
-              await session.view.goTo(
-                Viewpoint.fromJSON(destinationView.viewpoint),
-                { animate: false },
-              )
-              transitionDestination = await takeMapOnlyScreenshot(
-                session.view,
-                size,
-                signal,
-              )
-            } else {
-              transitionDestination = thumbnailByScene.get(frame.transitionToSceneId)
-            }
-          } else {
-            transitionDestination = thumbnailByScene.get(frame.transitionToSceneId)
-          }
-        }
-        if (!transitionSource || !transitionDestination) {
+        const sourceView = viewByScene.get(frame.transitionFromSceneId)
+        const destinationView = viewByScene.get(frame.transitionToSceneId)
+        if (!sourceView || !destinationView) {
           throw new Error(
-            `Transition frame ${frame.index + 1} is missing an endpoint image.`,
+            `Transition frame ${frame.index + 1} is missing captured view metadata.`,
           )
         }
-        if (phase === 'zoom-animation') {
-          if (frame.sourceScale === undefined || frame.destinationScale === undefined) {
-            throw new Error(`Zoom animation frame ${frame.index + 1} is missing map scales.`)
-          }
-          blob = await createZoomImageFrame(
-            transitionSource,
-            transitionDestination,
-            size,
-            frame.transitionProgress,
-            frame.sourceScale,
-            frame.destinationScale,
-            signal,
+        applyLayerStates(session.map, sourceView.layers)
+        await session.view.goTo(Viewpoint.fromJSON(frame.viewpoint), { animate: false })
+        const sourceImage = await takeMapOnlyScreenshot(session.view, size, signal)
+        const needsDestinationImage = frame.layerProgress !== undefined
+          || frame.zoomProgress !== undefined
+        let destinationImage = thumbnailByScene.get(frame.transitionToSceneId)
+        if (needsDestinationImage) {
+          applyLayerStates(session.map, destinationView.layers)
+          await session.view.goTo(
+            Viewpoint.fromJSON(
+              frame.zoomProgress === undefined
+                ? frame.viewpoint
+                : destinationView.viewpoint,
+            ),
+            { animate: false },
           )
-        } else {
-          blob = await crossFadeImageBlobs(
-            transitionSource,
-            transitionDestination,
-            size,
-            frame.transitionProgress,
-            signal,
-          )
+          destinationImage = await takeMapOnlyScreenshot(session.view, size, signal)
         }
+        if (!destinationImage) {
+          throw new Error(`Transition frame ${frame.index + 1} is missing its destination image.`)
+        }
+        blob = await createTransitionImageFrame(
+          sourceImage,
+          destinationImage,
+          size,
+          frame.transitionProgress,
+          frame.sourceScale,
+          frame.destinationScale,
+          frame.layerProgress,
+          signal,
+        )
       } else {
-        activeTransitionKey = undefined
-        transitionDestination = undefined
-        transitionSource = undefined
         applyLayerStates(session.map, frame.layers)
         await session.view.goTo(Viewpoint.fromJSON(frame.viewpoint), { animate: false })
         blob = await takeMapOnlyScreenshot(session.view, size, signal)
       }
-      lastRenderedBlob = blob
       await putFrame(
         {
           blob,
@@ -410,12 +373,8 @@ async function captureTimelineFrames(options: {
       progress({
         completed: frame.index + 1,
         detail: `${
-          phase === 'pan'
-            ? 'Captured pan'
-            : phase === 'zoom-animation'
-              ? 'Generated zoom animation'
-              : phase === 'layer-crossfade'
-                ? 'Generated layer cross-fade'
+          phase === 'transition'
+              ? 'Generated synchronized transition'
               : 'Staged final-view hold'
         } frame ${(frame.index + 1).toLocaleString()} of ${timeline.frames.length.toLocaleString()}`,
         phase: 'frames',

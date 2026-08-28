@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   applyLayerStates,
+  createTransitionImageFrame,
   createZoomImageFrame,
   crossFadeImageBlobs,
   dataUrlToBlob,
+  getVideoOutputSize,
+  planZoomDetailSteps,
 } from './view-state.ts'
 
 describe('offline video view state', () => {
@@ -97,6 +100,25 @@ describe('offline video view state', () => {
     expect(bitmap.close).toHaveBeenCalledOnce()
   })
 
+  it('plans multi-level zoom detail steps between source and destination scales', () => {
+    expect(planZoomDetailSteps(8_000, 1_000)).toEqual([
+      { endProgress: 1 / 3, fromScale: 8_000, startProgress: 0, toScale: 4_000 },
+      { endProgress: 2 / 3, fromScale: 4_000, startProgress: 1 / 3, toScale: 2_000 },
+      { endProgress: 1, fromScale: 2_000, startProgress: 2 / 3, toScale: 1_000 },
+    ])
+  })
+
+  it('captures at higher resolution while preserving even encoder dimensions', () => {
+    expect(getVideoOutputSize({ width: 801, height: 451 } as never)).toEqual({
+      height: 902,
+      width: 1_602,
+    })
+    expect(getVideoOutputSize({ width: 1_800, height: 1_000 } as never)).toEqual({
+      height: 1_066,
+      width: 1_920,
+    })
+  })
+
   it('contracts an expanded destination buffer when zooming out', async () => {
     const drawImage = vi.fn()
     const canvas = {
@@ -126,6 +148,40 @@ describe('offline video view state', () => {
     expect(createImageBitmapMock).toHaveBeenCalledWith(destinationBuffer)
     expect(drawImage).toHaveBeenCalledWith(bitmap, -400, -300, 1_600, 1_200)
     expect(bitmap.close).toHaveBeenCalledOnce()
+  })
+
+  it('composes synchronized transition frames with zoom and layer blending', async () => {
+    const drawImage = vi.fn()
+    const globalAlphaValues: number[] = []
+    const canvas = {
+      getContext: vi.fn(() => ({
+        drawImage,
+        set globalAlpha(value: number) {
+          globalAlphaValues.push(value)
+        },
+      })),
+      height: 0,
+      toBlob: vi.fn((callback: BlobCallback) => {
+        callback(new Blob(['transition'], { type: 'image/png' }))
+      }),
+      width: 0,
+    }
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ close: vi.fn() })))
+    vi.spyOn(document, 'createElement').mockReturnValue(canvas as never)
+
+    const result = await createTransitionImageFrame(
+      new Blob(['source']),
+      new Blob(['destination']),
+      { height: 600, width: 800 },
+      0.95,
+      4_000,
+      1_000,
+      0.95,
+    )
+
+    expect(await result.text()).toBe('transition')
+    expect(drawImage).toHaveBeenCalled()
+    expect(globalAlphaValues).toContain(0.95)
   })
 
   it('closes a decoded zoom bitmap when capture is cancelled', async () => {
