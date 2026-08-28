@@ -229,6 +229,7 @@ describe('OfflineVideoPlayer', () => {
   })
 
   it('renders accessible popup content inside the letterboxed video area and hides it outside hold windows', () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
     const { container } = render(
       <OfflineVideoPlayer
         assets={createAssets()}
@@ -310,6 +311,35 @@ describe('OfflineVideoPlayer', () => {
     unmount()
     expect(createObjectURL).toHaveBeenCalledTimes(4)
     expect(revokeObjectURL).toHaveBeenCalledTimes(4)
+  })
+
+  it('provides map-like home and tour controls without native video controls', () => {
+    const pauseSpy = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+    const playSpy = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue()
+    render(
+      <OfflineVideoPlayer
+        assets={createAssets()}
+        onError={vi.fn()}
+        packageRecord={createPackage()}
+      />,
+    )
+    const video = screen.getByLabelText('Accessible popup tour offline video')
+    expect(video).not.toHaveAttribute('controls')
+    expect(screen.getByRole('group', { name: 'Map tour controls' })).toBeInTheDocument()
+
+    currentTimeSeconds = 0.7
+    fireEvent.timeUpdate(video)
+    fireEvent.click(screen.getByRole('button', { name: 'Return to the first captured view' }))
+    expect(currentTimeSeconds).toBe(0.2)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Play map tour' }))
+    expect(playSpy).toHaveBeenCalledOnce()
+    expect(screen.getByRole('button', { name: 'Pause map tour' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Pause map tour' }))
+    expect(pauseSpy).toHaveBeenCalledTimes(2)
   })
 
   it('skips intermediate view holds and keeps popups hidden during multi-view navigation', () => {
