@@ -420,7 +420,6 @@ export function OfflineVideoPlayer({
       <div className="offline-video-stage" ref={stageRef}>
         <video
           ref={videoRef}
-          controls
           playsInline
           src={videoUrl}
           aria-label={`${packageRecord.item.title} offline video`}

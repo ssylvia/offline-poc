@@ -3,6 +3,34 @@ import type WebMap from '@arcgis/core/WebMap.js'
 import type MapView from '@arcgis/core/views/MapView.js'
 import type { CapturedLayerState, VideoOutputSize } from '../types.ts'
 
+const maximumVideoOutputWidth = 1_920
+const maximumVideoOutputHeight = 1_080
+const maximumVideoOutputScale = 2
+const zoomDetailStepFadePortion = 0.18
+
+export interface ZoomDetailStep {
+  endProgress: number
+  fromScale: number
+  startProgress: number
+  toScale: number
+}
+
+function ensureEvenPixelSize(value: number): number {
+  return Math.max(2, Math.floor(value / 2) * 2)
+}
+
+function validateZoomScales(sourceScale: number, destinationScale: number): void {
+  if (
+    !Number.isFinite(sourceScale)
+    || sourceScale <= 0
+    || !Number.isFinite(destinationScale)
+    || destinationScale <= 0
+    || sourceScale === destinationScale
+  ) {
+    throw new Error('Zoom animation requires two different positive map scales.')
+  }
+}
+
 export function captureLayerStates(map: WebMap): CapturedLayerState[] {
   return map.allLayers.toArray().map((layer) => ({
     id: layer.id,
@@ -29,8 +57,16 @@ export function applyLayerStates(map: WebMap, states: CapturedLayerState[]): voi
 }
 
 export function getVideoOutputSize(view: MapView): VideoOutputSize {
-  const width = Math.floor(view.width / 2) * 2
-  const height = Math.floor(view.height / 2) * 2
+  if (view.width < 1 || view.height < 1) {
+    throw new Error('The map preview is too small to capture a video.')
+  }
+  const scale = Math.max(1, Math.min(
+    maximumVideoOutputScale,
+    maximumVideoOutputWidth / view.width,
+    maximumVideoOutputHeight / view.height,
+  ))
+  const width = ensureEvenPixelSize(view.width * scale)
+  const height = ensureEvenPixelSize(view.height * scale)
   if (width < 2 || height < 2) {
     throw new Error('The map preview is too small to capture a video.')
   }
@@ -163,15 +199,7 @@ export async function createZoomImageFrame(
   if (!Number.isFinite(progress) || progress < 0 || progress > 1) {
     throw new Error('Zoom animation progress must be between zero and one.')
   }
-  if (
-    !Number.isFinite(sourceScale)
-    || sourceScale <= 0
-    || !Number.isFinite(destinationScale)
-    || destinationScale <= 0
-    || sourceScale === destinationScale
-  ) {
-    throw new Error('Zoom animation requires two different positive map scales.')
-  }
+  validateZoomScales(sourceScale, destinationScale)
   signal?.throwIfAborted()
   if (progress === 0) {
     return source
@@ -219,4 +247,82 @@ export async function createZoomImageFrame(
   } finally {
     image.close()
   }
+}
+
+export function planZoomDetailSteps(
+  sourceScale: number,
+  destinationScale: number,
+): ZoomDetailStep[] {
+  validateZoomScales(sourceScale, destinationScale)
+  const zoomStops = Math.abs(Math.log2(destinationScale / sourceScale))
+  const stepCount = Math.max(1, Math.ceil(zoomStops))
+  return Array.from({ length: stepCount }, (_, index) => {
+    const startProgress = index / stepCount
+    const endProgress = (index + 1) / stepCount
+    return {
+      endProgress,
+      fromScale: sourceScale * Math.pow(destinationScale / sourceScale, startProgress),
+      startProgress,
+      toScale: sourceScale * Math.pow(destinationScale / sourceScale, endProgress),
+    }
+  })
+}
+
+export function getActiveZoomDetailStep(
+  steps: ZoomDetailStep[],
+  progress: number,
+): ZoomDetailStep | undefined {
+  if (!Number.isFinite(progress) || progress < 0 || progress > 1) {
+    throw new Error('Zoom detail progress must be between zero and one.')
+  }
+  return steps.find((step) => progress <= step.endProgress) ?? steps.at(-1)
+}
+
+export async function createTransitionImageFrame(
+  source: Blob,
+  destination: Blob,
+  size: VideoOutputSize,
+  progress: number,
+  sourceScale?: number,
+  destinationScale?: number,
+  layerProgress?: number,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  if (!Number.isFinite(progress) || progress < 0 || progress > 1) {
+    throw new Error('Transition progress must be between zero and one.')
+  }
+  let frame = source
+  if (sourceScale !== undefined && destinationScale !== undefined && sourceScale !== destinationScale) {
+    const steps = planZoomDetailSteps(sourceScale, destinationScale)
+    const activeStep = getActiveZoomDetailStep(steps, progress)
+    if (activeStep) {
+      const stepProgress = (progress - activeStep.startProgress)
+        / Math.max(Number.EPSILON, activeStep.endProgress - activeStep.startProgress)
+      frame = await createZoomImageFrame(
+        source,
+        destination,
+        size,
+        Math.min(1, Math.max(0, stepProgress)),
+        activeStep.fromScale,
+        activeStep.toScale,
+        signal,
+      )
+      const fadeStart = activeStep.endProgress
+        - (activeStep.endProgress - activeStep.startProgress) * zoomDetailStepFadePortion
+      if (progress >= fadeStart) {
+        const fadeProgress = (progress - fadeStart) / Math.max(Number.EPSILON, activeStep.endProgress - fadeStart)
+        frame = await crossFadeImageBlobs(
+          frame,
+          destination,
+          size,
+          Math.min(1, Math.max(0, fadeProgress)),
+          signal,
+        )
+      }
+    }
+  }
+  if (layerProgress !== undefined) {
+    frame = await crossFadeImageBlobs(frame, destination, size, layerProgress, signal)
+  }
+  return frame
 }

@@ -56,13 +56,13 @@ describe('offline video popup capture', () => {
     const fetchMock = vi.fn<(typeof fetch)>().mockImplementation(async (input) => {
       const url = String(input)
       if (url.endsWith('/inline.png')) {
-        return new Response(new Blob(['png'], { type: 'image/png' }), {
+        return new Response('png', {
           headers: { 'Content-Type': 'image/png' },
           status: 200,
         })
       }
       if (url.endsWith('/guide.pdf')) {
-        return new Response(new Blob(['pdf'], { type: 'application/pdf' }), {
+        return new Response('pdf', {
           headers: { 'Content-Type': 'application/pdf' },
           status: 200,
         })
@@ -125,13 +125,13 @@ describe('offline video popup capture', () => {
     const fetchMock = vi.fn<(typeof fetch)>().mockImplementation(async (input) => {
       const url = String(input)
       if (url.endsWith('/photo.png')) {
-        return new Response(new Blob(['png'], { type: 'image/png' }), {
+        return new Response('png', {
           headers: { 'Content-Type': 'image/png' },
           status: 200,
         })
       }
       if (url.endsWith('/report.pdf')) {
-        return new Response(new Blob(['pdf'], { type: 'application/pdf' }), {
+        return new Response('pdf', {
           headers: { 'Content-Type': 'application/pdf' },
           status: 200,
         })

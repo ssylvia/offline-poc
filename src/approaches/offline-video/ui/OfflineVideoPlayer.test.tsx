@@ -239,6 +239,7 @@ describe('OfflineVideoPlayer', () => {
     setStageSize(container, 1_000, 1_000)
 
     const video = screen.getByLabelText('Accessible popup tour offline video')
+    expect(video).not.toHaveAttribute('controls')
     currentTimeSeconds = 0.2
     fireEvent.timeUpdate(video)
 

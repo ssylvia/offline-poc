@@ -145,9 +145,9 @@ export function VideoComposerPanel({
         <span className="count-badge">{views.length}</span>
       </div>
       <p className="scope-copy">
-        Pan, zoom, toggle layers, and optionally open a popup. Transitions pan first, then
-        animate the zoom and cross-fade the layer state separately. Add each final view in
-        playback order.
+        Pan, zoom, toggle layers, and optionally open a popup. Transitions synchronize pan,
+        zoom, rotation, and layer changes so saved playback feels more like natural map
+        navigation. Add each final view in playback order.
       </p>
       <button
         type="button"
